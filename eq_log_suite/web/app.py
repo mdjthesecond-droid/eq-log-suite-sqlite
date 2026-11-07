@@ -311,6 +311,73 @@ LOOT_RESULT_LIMIT = 50
 
 
 def _compute_loot(game, npc="", item="", zone=""):
+    """/loot from the knowledge base (facts.py): drops and quantities per
+    npc x zone x item, drop chance against the kills that were yours there
+    (mob_facts.kills_by_you), and each NPC's level range from its cons --
+    summed over tiers. Same rows as _compute_loot_from_events (verified with
+    tools/verify_facts.py), without scanning every recorded event."""
+    loot_where, loot_params = ["g.code = %s"], [game]
+    if npc:
+        loot_where.append("lf.npc LIKE %s"); loot_params.append(f"%{npc}%")
+    if item:
+        loot_where.append("lf.item LIKE %s"); loot_params.append(f"%{item}%")
+    conn = db.get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT lf.npc, lf.base_zone AS zone, lf.item, SUM(lf.drops) AS drops, SUM(lf.qty_total) AS qty "
+                "FROM loot_facts lf JOIN games g ON g.id=lf.game_id "
+                f"WHERE {' AND '.join(loot_where)} GROUP BY lf.npc, lf.base_zone, lf.item",
+                loot_params,
+            )
+            loot = cur.fetchall()
+            cur.execute(
+                "SELECT mf.npc, mf.base_zone AS zone, SUM(mf.kills_by_you) AS kills, "
+                "MIN(mf.level_min) AS level_min, MAX(mf.level_max) AS level_max "
+                "FROM mob_facts mf JOIN games g ON g.id=mf.game_id WHERE g.code=%s GROUP BY mf.npc, mf.base_zone",
+                (game,),
+            )
+            mobs = cur.fetchall()
+    finally:
+        conn.close()
+
+    kills = {(m["npc"].lower(), m["zone"]): int(m["kills"] or 0) for m in mobs}
+    levels: dict = {}
+    for m in mobs:
+        lv = levels.setdefault(m["npc"].lower(), [None, None])
+        if m["level_min"] is not None:
+            lv[0] = m["level_min"] if lv[0] is None else min(lv[0], m["level_min"])
+            lv[1] = m["level_max"] if lv[1] is None else max(lv[1], m["level_max"])
+
+    rows = []
+    for r in loot:
+        kill_count = kills.get((r["npc"].lower(), r["zone"])) or None
+        rows.append({
+            "zone": r["zone"] or None, "npc": r["npc"], "item": r["item"],
+            "avg_qty": round(r["qty"] / r["drops"], 1),
+            "drops": r["drops"],
+            "kill_count": kill_count,
+            "chance_pct": round(r["drops"] / kill_count * 100, 2) if kill_count else None,
+        })
+    if zone:
+        needle = zone.lower()
+        rows = [r for r in rows if needle in (r["zone"] or "").lower()]
+    # NULLs (no kill_count) last; zone/npc break ties (see _compute_loot_from_events)
+    rows.sort(key=lambda r: (r["item"] or "", r["chance_pct"] is None, -(r["chance_pct"] or 0),
+                             (r["zone"] or "").lower(), (r["npc"] or "").lower()))
+    truncated = len(rows) > LOOT_RESULT_LIMIT
+    rows = rows[:LOOT_RESULT_LIMIT]
+    for r in rows:
+        r["zone"] = r["zone"] or "(unknown zone)"
+        r["npc"] = r["npc"] or "(unknown npc)"
+        lo, hi = levels.get(r["npc"].lower(), [None, None])
+        r["level"] = None if lo is None else (str(lo) if lo == hi else f"{lo}-{hi}")
+    return rows, truncated
+
+
+def _compute_loot_from_events(game, npc="", item="", zone=""):
+    # The pre-facts /loot, computed from every recorded event. Kept only so
+    # tools/verify_facts.py can check _compute_loot against it.
     # /loot used to render the *entire* zone->npc->item drop table
     # unconditionally (~0.7s of correlated zone lookups over every loot/
     # death event, every single page load) now that /zoneinfo covers

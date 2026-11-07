@@ -65,7 +65,7 @@ def main(game="eql"):
         kills[(m["npc"].lower(), m["base_zone"])] += m["kills_by_you"]
     for lf in loot:
         drops[(lf["npc"].lower(), lf["base_zone"], lf["item"].lower())] += lf["drops"]
-    rows, _ = app._compute_loot(game)
+    rows, _ = app._compute_loot_from_events(game)
     differ = []
     for r in rows:
         z = r["zone"] or ""
@@ -77,6 +77,25 @@ def main(game="eql"):
     for d in differ[:10]:
         print("   ", d)
     ok &= not differ
+
+    # /loot as the page renders it: facts version vs the old event version,
+    # unfiltered and with each kind of filter
+    first = rows[0] if rows else {"npc": "", "item": "", "zone": ""}
+    for label, kw in (("no filter", {}), ("npc", {"npc": first["npc"][:4]}),
+                      ("item", {"item": first["item"][:4]}), ("zone", {"zone": (first["zone"] or "")[:5]})):
+        for limit in (10**9, 50):
+            app.LOOT_RESULT_LIMIT = limit
+            new, old = app._compute_loot(game, **kw), app._compute_loot_from_events(game, **kw)
+            same = new == old
+            ok &= same
+            print(f"/loot page rows ({label}, limit {'all' if limit > 50 else 50}): "
+                  f"{'identical' if same else 'DIFFER'} ({len(new[0])} rows)")
+            if not same:
+                for a, b in zip(new[0], old[0]):
+                    if a != b:
+                        print("     facts:", a, "\n     events:", b)
+                        break
+    app.LOOT_RESULT_LIMIT = 10**9
     return ok
 
 
