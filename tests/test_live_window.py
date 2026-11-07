@@ -187,6 +187,25 @@ def test_selecting_records_into_database_once():
         conn.close()
 
 
+def test_oddly_named_copy_with_confirmed_character_adds_nothing():
+    log = LOGS / "eqlog_Recorder_testserver.txt"
+    before = _kb_lines(log)
+    odd = TMP / "friday raid.txt"                # name says nothing about whose it is
+    odd.write_bytes(log.read_bytes())
+    try:
+        lw.select(str(odd), "all")               # no name to guess from -> must ask
+        raise AssertionError("expected a request for the character name")
+    except ValueError as e:
+        assert "character" in str(e)
+    lw.select(str(odd), "all", character="Recorder", server="testserver")
+    assert _kb_lines(log) == before              # confirmed identity -> recognized as already recorded
+    try:
+        lw.select(str(odd), "all", character="Someone", server="else")
+        raise AssertionError("expected refusal to re-assign")
+    except ValueError as e:
+        assert "already recorded as Recorder" in str(e)
+
+
 def test_live_connection_sees_both_databases():
     conn = lw.connection()
     try:

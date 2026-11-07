@@ -2,7 +2,7 @@
 {% block title %}Browse for a log{% endblock %}
 {% block content %}
 <h1>Browse for a log</h1>
-<p style="opacity:0.8;">Pick any <code>eqlog_*</code> file -- an archived or rotated log, another
+<p style="opacity:0.8;">Pick any log file (any <code>.txt</code>, renamed or not) -- an archived or rotated log, another
 character's, a friend's. Opening it loads it into the Live view and records it into the
 database; anything already recorded (e.g. from a copy of the same log) is skipped. Once opened,
 it stays in the picker's list.</p>
@@ -10,37 +10,29 @@ it stays in the picker's list.</p>
 <p><strong>{{ listing.dir }}</strong></p>
 {% if listing.error %}<p class="live-picker-error">{{ listing.error }}</p>{% endif %}
 
-<form method="post" action="/live-window/select">
-  <input type="hidden" name="next" value="{{ next }}">
-  <label>Window
-    <select name="window">
-      {% for key, label in windows.items() %}
-      <option value="{{ key }}" {% if key == window %}selected{% endif %}>{{ label }}</option>
-      {% endfor %}
-    </select>
-  </label>
-
-  <h2>Logs here</h2>
-  {% if listing.logs %}
-  <table>
-    <thead><tr><th>file</th><th>character</th><th>server</th><th>size</th><th>last written</th><th></th></tr></thead>
-    <tbody>
-      {% for l in listing.logs %}
-      <tr>
-        <td>{{ l.name }}</td>
-        <td>{{ l.character or '' }}</td>
-        <td>{{ l.server or '' }}</td>
-        <td>{{ '{:,.1f}'.format(l.size / 1048576) }} MB</td>
-        <td>{{ l.mtime.strftime('%a %b %d %Y %H:%M') }}</td>
-        <td><button type="submit" name="log_path" value="{{ l.path }}">Open</button></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p style="opacity:0.8;">No eqlog_* files in this folder.</p>
-  {% endif %}
-</form>
+<h2>Logs here</h2>
+{% if listing.logs %}
+<table>
+  <thead><tr><th>file</th><th>character</th><th>server</th><th>size</th><th>last written</th><th>window</th><th></th></tr></thead>
+  <tbody>
+    {% for l in listing.logs %}
+    <tr><form method="post" action="/live-window/select">
+      <input type="hidden" name="next" value="{{ next }}">
+      <input type="hidden" name="log_path" value="{{ l.path }}">
+      <td>{{ l.name }}</td>
+      <td><input name="character" size="12" value="{{ l.character or '' }}" {% if l.identity_known %}readonly title="already recorded as this character"{% endif %}></td>
+      <td><input name="server" size="12" value="{{ l.server or '' }}" {% if l.identity_known %}readonly{% endif %}></td>
+      <td>{{ '{:,.1f}'.format(l.size / 1048576) }} MB</td>
+      <td>{{ l.mtime.strftime('%a %b %d %Y %H:%M') }}</td>
+      <td><select name="window">{% for key, label in windows.items() %}<option value="{{ key }}" {% if key == window %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></td>
+      <td><button type="submit">Open</button></td>
+    </form></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p style="opacity:0.8;">No .txt files in this folder.</p>
+{% endif %}
 
 <h2>Folders</h2>
 <ul>

@@ -4,12 +4,12 @@
 <form class="live-picker" method="post" action="/live-window/select">
   <input type="hidden" name="next" value="{{ picker.next }}">
   <label>Log
-    <select name="log_path">
+    <select name="log_path" class="live-picker-log">
       {% if st and st.path and st.path not in picker.logs|map(attribute='path') %}
       <option value="{{ st.path }}" selected>{{ st.file_name }}</option>
       {% endif %}
       {% for l in picker.logs %}
-      <option value="{{ l.path }}" {% if (st and l.path == st.path) or (not st and l.path == picker.last) %}selected{% endif %}>
+      <option value="{{ l.path }}" data-character="{{ l.character or '' }}" data-server="{{ l.server or '' }}" {% if (st and l.path == st.path) or (not st and l.path == picker.last) %}selected{% endif %}>
         {{ l.name }} -- {{ l.mtime.strftime('%a %b %d %H:%M') }}{% if not l.in_default_folder %} (elsewhere){% endif %}
       </option>
       {% endfor %}
@@ -18,6 +18,10 @@
       {% endif %}
     </select>
   </label>
+  <label title="Whose log this is. Guessed from the filename -- correct it for a renamed copy.">Character
+    <input name="character" class="live-picker-character" size="12" value="{{ st.character_name if st else '' }}">
+  </label>
+  <label>Server <input name="server" class="live-picker-server" size="12" value="{{ st.server if st else '' }}"></label>
   <a href="/live-window/browse?next={{ picker.next|urlencode }}">Browse&hellip;</a>
   <label>Window
     <select name="window">
@@ -45,3 +49,17 @@
     {% endif %}
   </div>
 </form>
+<script>
+// Fill character/server from the chosen log (recorded identity, else the
+// filename guess); editable before Load.
+(function () {
+  for (const form of document.querySelectorAll("form.live-picker")) {
+    const sel = form.querySelector(".live-picker-log");
+    const ch = form.querySelector(".live-picker-character"), sv = form.querySelector(".live-picker-server");
+    const fill = () => { const o = sel.selectedOptions[0]; if (!o) return;
+      ch.value = o.dataset.character || ""; sv.value = o.dataset.server || ""; };
+    sel.addEventListener("change", fill);
+    if (!ch.value) fill();
+  }
+})();
+</script>

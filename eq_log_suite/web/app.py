@@ -3562,10 +3562,13 @@ def _picker_context(request: Request, error: str = "") -> dict:
 
 
 @app.post("/live-window/select")
-def live_window_select(log_path: str = Form(...), window: str = Form(live_window.DEFAULT_WINDOW), next: str = Form("/encounters")):
+def live_window_select(
+    log_path: str = Form(...), window: str = Form(live_window.DEFAULT_WINDOW), next: str = Form("/encounters"),
+    character: str = Form(""), server: str = Form(""),
+):
     target = _safe_next(next)
     try:
-        live_window.select(log_path, window)
+        live_window.select(log_path, window, character, server)
     except (ValueError, OSError) as e:
         sep = "&" if "?" in target else "?"
         return RedirectResponse(f"{target}{sep}picker_error={quote(str(e))}", status_code=303)

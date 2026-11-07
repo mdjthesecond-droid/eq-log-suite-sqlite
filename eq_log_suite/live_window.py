@@ -335,14 +335,14 @@ def refresh() -> dict:
             raw.close()
 
 
-def _record(path: str, game_code: str):
+def _record(path: str, game_code: str, character: str | None, server: str | None):
     """Reads the selected log into the permanent database: the whole file
     the first time (or if it's a different file than last time -- see
     coverage.py), only what's new since the saved offset otherwise, never a
     line that's already recorded under any file name. Also makes it the one
     log being followed (live=1)."""
     from eq_log_suite.importer import import_file
-    import_file(path, game_code, None, None)
+    import_file(path, game_code, character, server)
     kb = db.get_connection()
     try:
         with kb.cursor() as cur:
@@ -352,7 +352,7 @@ def _record(path: str, game_code: str):
         kb.close()
 
 
-def select(path: str, window: str) -> dict:
+def select(path: str, window: str, character: str | None = None, server: str | None = None) -> dict:
     """The picker's action, and the only way a log becomes active: record
     `path` into the database (de-duplicated), load it into the Live window
     over `window`, and make it the log being followed. Raises ValueError for
@@ -363,9 +363,19 @@ def select(path: str, window: str) -> dict:
     path = str(Path(path).expanduser())
     if not os.path.isfile(path):
         raise ValueError(f"{path} isn't a file")
+    character = (character or "").strip() or guess_character_from_filename(path) or None
+    server = (server or "").strip() or guess_server_from_filename(path) or None
+    if not character:
+        raise ValueError(f"Can't tell whose log {Path(path).name} is -- enter the character name.")
+    known = recorded_identity(path)
+    if known and (known["name"].lower(), (known["server"] or "").lower()) != (character.lower(), (server or "").lower()):
+        raise ValueError(
+            f"{Path(path).name} is already recorded as {known['name']} ({known['server'] or 'no server'}) -- "
+            "a file can't be re-assigned to a different character."
+        )
     with _lock:
         _started = True  # an explicit pick is this process's starting point
-        _record(path, _parser_for(path, None).game_code)
+        _record(path, _parser_for(path, None).game_code, character, server)
         state = _load(path, window, cutoff_for(window))
     db.set_setting("live.log_path", path)
     recent = [p for p in (db.get_setting("live.recent") or []) if p != path]
@@ -448,13 +458,30 @@ def _is_log_name(name: str) -> bool:
     return low.startswith("eqlog_") and (low.endswith(".txt") or ".txt." in low)
 
 
+def recorded_identity(path: str) -> dict | None:
+    """(character, server) this exact file was already recorded as, if any."""
+    kb = db.get_connection()
+    try:
+        with kb.cursor() as cur:
+            cur.execute("SELECT c.name, c.server FROM log_sources ls JOIN characters c ON c.id=ls.character_id "
+                        "WHERE ls.file_path=%s", (path,))
+            return cur.fetchone()
+    finally:
+        kb.close()
+
+
 def _describe(path: str, in_default: bool) -> dict:
     st = os.stat(path)
+    known = recorded_identity(path)
     return {
         "path": path,
         "name": Path(path).name,
-        "character": guess_character_from_filename(path),
-        "server": guess_server_from_filename(path),
+        # Already recorded: that's who it is. Otherwise a guess from the
+        # filename, shown editable in the picker -- the log itself never
+        # says whose it is, and a renamed copy guesses wrong.
+        "character": known["name"] if known else guess_character_from_filename(path),
+        "server": known["server"] if known else guess_server_from_filename(path),
+        "identity_known": bool(known),
         "size": st.st_size,
         "mtime": datetime.fromtimestamp(st.st_mtime),
         "in_default_folder": in_default,
@@ -495,6 +522,9 @@ def browse(directory: str | None) -> dict:
     except OSError as e:
         return {"dir": str(d), "parent": str(d.parent), "dirs": [], "logs": [], "error": str(e)}
     dirs = [e.path for e in entries if e.is_dir() and not e.name.startswith(".")]
-    logs = [_describe(e.path, False) for e in entries if e.is_file() and _is_log_name(e.name)]
+    # Any .txt here, not just eqlog_* -- an archived copy may have been
+    # renamed to anything; the character/server are confirmed on open.
+    logs = [_describe(e.path, False) for e in entries
+            if e.is_file() and (e.name.lower().endswith(".txt") or ".txt." in e.name.lower())]
     logs.sort(key=lambda l: l["mtime"], reverse=True)
     return {"dir": str(d), "parent": str(d.parent) if d.parent != d else None, "dirs": dirs, "logs": logs, "error": None}
