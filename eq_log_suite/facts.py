@@ -9,7 +9,9 @@ a zone in the first place:
 * deaths        every death of the mob seen in the log (group/raid kills too)
 * kills_by_you  the killing blow was yours
 * kills_engaged you were in the fight: the killing blow was yours, or you
-                and it traded hits within ENGAGED_WINDOW before it died.
+                and it traded hits within ENGAGED_WINDOW before it died, or
+                you looted its corpse (only your encounter's kills can be
+                looted -- covers being dead while the party finished it).
                 Encounter locking makes that your kill -- you see its loot
                 whoever landed the blow -- so it's /loot's drop-chance base.
                 (Same-named mobs can't be told apart: another "a ghoul"
@@ -44,6 +46,9 @@ HP_FIGHT_GAP = timedelta(minutes=10)
 # You were "in the fight" if you and the mob traded hits this recently
 # before it died (every hit refreshes it).
 ENGAGED_WINDOW = timedelta(seconds=60)
+# A loot from a corpse proves the kill was yours if it comes this soon after
+# that mob's death.
+LOOT_AFTER_DEATH = timedelta(minutes=5)
 
 
 def _is_dummy(name):
@@ -61,6 +66,7 @@ class FactExtractor:
         self.visits: list = []
         self.fight: dict = {}       # npc -> [damage taken so far, last hit ts], for rare HP
         self.engaged: dict = {}     # npc -> last time you and it traded hits
+        self.uncounted: dict = {}   # npc -> (mob key, death ts) of its last death not yet counted as yours
         with conn.cursor() as cur:
             cur.execute("SELECT DISTINCT npc FROM mob_facts WHERE game_id=%s AND rare=1", (game_id,))
             self.rares = {r["npc"].lower() for r in cur.fetchall()}
@@ -83,8 +89,8 @@ class FactExtractor:
 
     # -- facts --------------------------------------------------------------
 
-    def _mob(self, npc, ts):
-        key = (npc,) + self.zone
+    def _mob(self, npc, ts, key=None):
+        key = key or ((npc,) + self.zone)
         m = self.mobs.get(key)
         if m is None:
             m = self.mobs[key] = {"deaths": 0, "kills_by_you": 0, "kills_engaged": 0, "cons": 0, "level_min": None, "level_max": None,
@@ -132,12 +138,22 @@ class FactExtractor:
             last = self.engaged.get(npc.lower())
             if ev.source_type == "you" or (last is not None and ts - last <= ENGAGED_WINDOW):
                 m["kills_engaged"] += 1
+                self.uncounted.pop(npc.lower(), None)
+            else:
+                self.uncounted[npc.lower()] = ((npc,) + self.zone, ts)
             f = self.fight.pop(npc.lower(), None)
             if f and npc.lower() in self.rares and f[0] > 0:
                 m["hp"].append(f[0])
             return
 
         if et == "loot" and ev.source_name and ev.target_name and not _is_dummy(ev.source_name):
+            pending = self.uncounted.pop(ev.source_name.lower(), None)
+            if pending and ts - pending[1] <= LOOT_AFTER_DEATH:
+                # you looted it, so it was your encounter's kill -- counted once,
+                # however many items come off the corpse
+                key, death_ts = pending
+                # the zone it died in, even if a delta for it was already flushed
+                self._mob(key[0], death_ts, key=key)["kills_engaged"] += 1
             self._mob(ev.source_name, ts)
             key = (ev.source_name,) + self.zone + (ev.target_name,)
             d = self.loot.setdefault(key, [0, 0])

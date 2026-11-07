@@ -119,6 +119,24 @@ def test_kills_you_were_in_on():
     assert (s["deaths"], s["kills_by_you"], s["kills_engaged"]) == (3, 0, 1), dict(s)
 
 
+def test_looted_corpse_counts_as_your_kill():
+    # dead (or healing, or pulling) while the party finished it -- you never
+    # traded hits, but you looted it, so it was your encounter's kill
+    d = TMP / "looted"
+    d.mkdir()
+    log = d / "eqlog_Charlie_s1.txt"
+    log.write_text("".join([
+        L(0, "You have entered The Plane of Fear - Group."),
+        L(10, "A phantasm has been slain by Risutachi!"),
+        L(11, "You looted a Crystallized Sulfur from a phantasm's corpse."),
+        L(12, "You looted a Bone Chip from a phantasm's corpse."),      # same corpse: still one kill
+        L(500, "A phantasm has been slain by Risutachi!"),              # not looted, not your fight
+    ]), newline="")
+    import_file(str(log), "eql", None, None)
+    m = mob("a phantasm", parse_zone_tier("The Plane of Fear - Group")[0])
+    assert (m["deaths"], m["kills_engaged"]) == (2, 1), dict(m)
+
+
 def test_copy_of_same_log_adds_no_facts():
     before = [dict(r) for r in facts_rows("mob_facts")], [dict(r) for r in facts_rows("loot_facts")]
     visits_before = len(facts_rows("zone_visits"))
