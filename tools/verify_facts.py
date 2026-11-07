@@ -78,23 +78,26 @@ def main(game="eql"):
         print("   ", d)
     ok &= not differ
 
-    # /loot as the page renders it: facts version vs the old event version,
-    # unfiltered and with each kind of filter
+    # /loot as the page renders it: facts version vs the old event version.
+    # Everything must match except the drop chance, which now counts every
+    # kill you were in on (kills_engaged), not just killing blows -- so check
+    # that it never counts fewer kills than before, and how >100% rows change.
     first = rows[0] if rows else {"npc": "", "item": "", "zone": ""}
+    same_fields = ("zone", "npc", "item", "avg_qty", "drops", "level")
     for label, kw in (("no filter", {}), ("npc", {"npc": first["npc"][:4]}),
                       ("item", {"item": first["item"][:4]}), ("zone", {"zone": (first["zone"] or "")[:5]})):
-        for limit in (10**9, 50):
-            app.LOOT_RESULT_LIMIT = limit
-            new, old = app._compute_loot(game, **kw), app._compute_loot_from_events(game, **kw)
-            same = new == old
-            ok &= same
-            print(f"/loot page rows ({label}, limit {'all' if limit > 50 else 50}): "
-                  f"{'identical' if same else 'DIFFER'} ({len(new[0])} rows)")
-            if not same:
-                for a, b in zip(new[0], old[0]):
-                    if a != b:
-                        print("     facts:", a, "\n     events:", b)
-                        break
+        new, old = app._compute_loot(game, **kw)[0], app._compute_loot_from_events(game, **kw)[0]
+        key = lambda r: (r["npc"].lower(), r["zone"], r["item"].lower())  # noqa: E731
+        N, O = {key(r): r for r in new}, {key(r): r for r in old}
+        fields_ok = N.keys() == O.keys() and all(all(N[k][f] == O[k][f] for f in same_fields) for k in N)
+        fewer = [k for k in N if (N[k]["kill_count"] or 0) < (O[k]["kill_count"] or 0)]
+        ok &= fields_ok and not fewer
+        print(f"/loot page ({label}): {len(N)} rows; drops/qty/level/zone {'identical' if fields_ok else 'DIFFER'}; "
+              f"kills counted lower than before: {len(fewer)}")
+        if label == "no filter":
+            over = lambda rs: sum(1 for r in rs if r["chance_pct"] and r["chance_pct"] > 100)  # noqa: E731
+            nokill = lambda rs: sum(1 for r in rs if not r["kill_count"])  # noqa: E731
+            print(f"    over 100%: {over(old)} -> {over(new)};  drops with no kill counted: {nokill(old)} -> {nokill(new)}")
     app.LOOT_RESULT_LIMIT = 10**9
     return ok
 

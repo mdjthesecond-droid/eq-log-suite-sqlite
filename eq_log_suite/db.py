@@ -103,6 +103,7 @@ def apply_schema(raw_conn, include_indexes: bool = True):
 # (table, column, declaration) -- see apply_schema.
 _ADDED_COLUMNS = [
     ("log_sources", "fingerprint", "TEXT NULL"),
+    ("mob_facts", "kills_engaged", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

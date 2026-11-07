@@ -206,7 +206,9 @@ CREATE TABLE IF NOT EXISTS mob_facts (
     tier INTEGER NOT NULL,
     solo INTEGER NOT NULL,
     deaths INTEGER NOT NULL DEFAULT 0,       -- every death seen (group/raid kills too) -- /npcs, /zoneinfo
-    kills_by_you INTEGER NOT NULL DEFAULT 0, -- killing blow yours -- /loot's drop chance
+    kills_by_you INTEGER NOT NULL DEFAULT 0, -- killing blow yours
+    kills_engaged INTEGER NOT NULL DEFAULT 0, -- you were in the fight (encounter locking: your kill, your
+                                              -- loot, whoever landed the blow) -- /loot's drop chance
     cons INTEGER NOT NULL DEFAULT 0,
     level_min INTEGER NULL,
     level_max INTEGER NULL,

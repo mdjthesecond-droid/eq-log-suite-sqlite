@@ -312,10 +312,11 @@ LOOT_RESULT_LIMIT = 50
 
 def _compute_loot(game, npc="", item="", zone=""):
     """/loot from the knowledge base (facts.py): drops and quantities per
-    npc x zone x item, drop chance against the kills that were yours there
-    (mob_facts.kills_by_you), and each NPC's level range from its cons --
-    summed over tiers. Same rows as _compute_loot_from_events (verified with
-    tools/verify_facts.py), without scanning every recorded event."""
+    npc x zone x item, drop chance against your kills there -- every kill you
+    were in the fight for (mob_facts.kills_engaged: encounter locking means
+    you see its loot whoever landed the blow; the pre-facts page only counted
+    killing blows, which put group kills over 100%) -- and each NPC's level
+    range from its cons, summed over tiers."""
     loot_where, loot_params = ["g.code = %s"], [game]
     if npc:
         loot_where.append("lf.npc LIKE %s"); loot_params.append(f"%{npc}%")
@@ -332,7 +333,7 @@ def _compute_loot(game, npc="", item="", zone=""):
             )
             loot = cur.fetchall()
             cur.execute(
-                "SELECT mf.npc, mf.base_zone AS zone, SUM(mf.kills_by_you) AS kills, "
+                "SELECT mf.npc, mf.base_zone AS zone, SUM(mf.kills_engaged) AS kills, "
                 "MIN(mf.level_min) AS level_min, MAX(mf.level_max) AS level_max "
                 "FROM mob_facts mf JOIN games g ON g.id=mf.game_id WHERE g.code=%s GROUP BY mf.npc, mf.base_zone",
                 (game,),

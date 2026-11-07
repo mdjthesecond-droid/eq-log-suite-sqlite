@@ -89,6 +89,7 @@ def test_facts_from_one_import():
     assert (g["tier"], g["solo"]) == (tier, 1 if solo else 0)
     assert g["cons"] == 1 and g["level_min"] == g["level_max"] == 14
     assert g["deaths"] == 2 and g["kills_by_you"] == 1          # one yours, one Jenobn's
+    assert g["kills_engaged"] == 2                               # ...both while you were fighting ghouls
     assert g["rare"] == 0 and g["hp_samples"] == 0               # never HP for an ordinary name
 
     b = mob("Bloodgurgler", base)
@@ -101,14 +102,32 @@ def test_facts_from_one_import():
     assert not any(r["npc"].startswith("Test ") for r in facts_rows("mob_facts"))
 
 
+def test_kills_you_were_in_on():
+    d = TMP / "engaged"
+    d.mkdir()
+    log = d / "eqlog_Bravo_s1.txt"
+    log.write_text("".join([
+        L(0, "You have entered Kedge Keep."),
+        L(1, "A skeleton has been slain by Jenobn!"),                  # not your fight
+        L(100, "A skeleton hits YOU for 5 points of damage."),
+        L(110, "A skeleton has been slain by Jenobn!"),                # your fight, his blow
+        L(200, "You try to slash a skeleton, but miss!"),
+        L(300, "A skeleton has been slain by Jenobn!"),                # last exchange 100s ago
+    ]), newline="")
+    import_file(str(log), "eql", None, None)
+    s = mob("a skeleton", "Kedge Keep")
+    assert (s["deaths"], s["kills_by_you"], s["kills_engaged"]) == (3, 0, 1), dict(s)
+
+
 def test_copy_of_same_log_adds_no_facts():
     before = [dict(r) for r in facts_rows("mob_facts")], [dict(r) for r in facts_rows("loot_facts")]
+    visits_before = len(facts_rows("zone_visits"))
     copy = TMP / "one" / "eqlog_Alpha_s1.txt.archived"
     shutil.copy(TMP / "one" / "eqlog_Alpha_s1.txt", copy)
     import_file(str(copy), "eql", None, None)
     after = [dict(r) for r in facts_rows("mob_facts")], [dict(r) for r in facts_rows("loot_facts")]
     assert before == after
-    assert len(facts_rows("zone_visits")) == 1
+    assert len(facts_rows("zone_visits")) == visits_before
 
 
 def test_rebuild_from_events_matches_incremental():

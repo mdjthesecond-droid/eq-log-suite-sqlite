@@ -7,7 +7,13 @@ each character's zone history (zone_visits) that attributes everything to
 a zone in the first place:
 
 * deaths        every death of the mob seen in the log (group/raid kills too)
-* kills_by_you  the killing blow was yours (what /loot's drop chance uses)
+* kills_by_you  the killing blow was yours
+* kills_engaged you were in the fight: the killing blow was yours, or you
+                and it traded hits within ENGAGED_WINDOW before it died.
+                Encounter locking makes that your kill -- you see its loot
+                whoever landed the blow -- so it's /loot's drop-chance base.
+                (Same-named mobs can't be told apart: another "a ghoul"
+                killed nearby within the window counts too.)
 * cons, level_min/max, rare
 * loot          item, number of drops, total quantity
 * HP            only for rare mobs: one is only ever up at a time, so the
@@ -35,6 +41,9 @@ DAMAGE_TYPES = ("melee", "spell_damage", "ability_damage")
 # A rare that took damage, then nothing for this long, didn't die in that
 # fight (it got away, or we did) -- start counting its HP over.
 HP_FIGHT_GAP = timedelta(minutes=10)
+# You were "in the fight" if you and the mob traded hits this recently
+# before it died (every hit refreshes it).
+ENGAGED_WINDOW = timedelta(seconds=60)
 
 
 def _is_dummy(name):
@@ -51,6 +60,7 @@ class FactExtractor:
         self.loot: dict = {}        # pending deltas, keyed (npc, base_zone, tier, solo, item)
         self.visits: list = []
         self.fight: dict = {}       # npc -> [damage taken so far, last hit ts], for rare HP
+        self.engaged: dict = {}     # npc -> last time you and it traded hits
         with conn.cursor() as cur:
             cur.execute("SELECT DISTINCT npc FROM mob_facts WHERE game_id=%s AND rare=1", (game_id,))
             self.rares = {r["npc"].lower() for r in cur.fetchall()}
@@ -77,7 +87,7 @@ class FactExtractor:
         key = (npc,) + self.zone
         m = self.mobs.get(key)
         if m is None:
-            m = self.mobs[key] = {"deaths": 0, "kills_by_you": 0, "cons": 0, "level_min": None, "level_max": None,
+            m = self.mobs[key] = {"deaths": 0, "kills_by_you": 0, "kills_engaged": 0, "cons": 0, "level_min": None, "level_max": None,
                                   "rare": 0, "hp": [], "first": ts, "last": ts}
         m["first"] = min(m["first"], ts)
         m["last"] = max(m["last"], ts)
@@ -119,6 +129,9 @@ class FactExtractor:
             m["deaths"] += 1
             if ev.source_type == "you":
                 m["kills_by_you"] += 1
+            last = self.engaged.get(npc.lower())
+            if ev.source_type == "you" or (last is not None and ts - last <= ENGAGED_WINDOW):
+                m["kills_engaged"] += 1
             f = self.fight.pop(npc.lower(), None)
             if f and npc.lower() in self.rares and f[0] > 0:
                 m["hp"].append(f[0])
@@ -138,6 +151,11 @@ class FactExtractor:
                     self._mob(name, ts)
             if ev.target_name and ev.target_type != "you" and ev.amount:
                 self._fight_add(ev.target_name, ev.amount, ts)
+            # you and it traded hits (either way, landed or not)
+            if ev.source_type == "you" and ev.target_name and ev.target_type != "you":
+                self.engaged[ev.target_name.lower()] = ts
+            elif ev.target_type == "you" and ev.source_name and ev.source_type != "you":
+                self.engaged[ev.source_name.lower()] = ts
             return
 
         if et == "spell_heal" and ev.target_name and ev.target_type == "npc" and ev.amount:
@@ -168,11 +186,12 @@ class FactExtractor:
             for (npc, base, tier, solo), m in self.mobs.items():
                 hp = m["hp"]
                 cur.execute(
-                    "INSERT INTO mob_facts (game_id, npc, base_zone, tier, solo, deaths, kills_by_you, cons, "
-                    "level_min, level_max, rare, hp_samples, hp_min, hp_max, first_seen, last_seen) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "INSERT INTO mob_facts (game_id, npc, base_zone, tier, solo, deaths, kills_by_you, kills_engaged, "
+                    "cons, level_min, level_max, rare, hp_samples, hp_min, hp_max, first_seen, last_seen) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                     "ON CONFLICT (game_id, npc, base_zone, tier, solo) DO UPDATE SET "
                     "deaths = deaths + excluded.deaths, kills_by_you = kills_by_you + excluded.kills_by_you, "
+                    "kills_engaged = kills_engaged + excluded.kills_engaged, "
                     "cons = cons + excluded.cons, "
                     "level_min = COALESCE(MIN(level_min, excluded.level_min), level_min, excluded.level_min), "
                     "level_max = COALESCE(MAX(level_max, excluded.level_max), level_max, excluded.level_max), "
@@ -180,7 +199,7 @@ class FactExtractor:
                     "hp_min = COALESCE(MIN(hp_min, excluded.hp_min), hp_min, excluded.hp_min), "
                     "hp_max = COALESCE(MAX(hp_max, excluded.hp_max), hp_max, excluded.hp_max), "
                     "first_seen = MIN(first_seen, excluded.first_seen), last_seen = MAX(last_seen, excluded.last_seen)",
-                    (self.game_id, npc, base, tier, solo, m["deaths"], m["kills_by_you"], m["cons"],
+                    (self.game_id, npc, base, tier, solo, m["deaths"], m["kills_by_you"], m["kills_engaged"], m["cons"],
                      m["level_min"], m["level_max"], m["rare"], len(hp), min(hp) if hp else None,
                      max(hp) if hp else None, m["first"], m["last"]),
                 )
