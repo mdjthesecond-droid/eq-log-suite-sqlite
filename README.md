@@ -33,11 +33,14 @@ auth/reverse proxy rather than binding it publicly as-is.
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-cp config/local.example.yaml config/local.yaml
-# edit config/local.yaml: point log_roots at your EQ log folder(s)
 ```
 
-That's it -- no database server. The database is one file
+That's it -- no database server and no config file to edit. Start the app
+(`bin/start-web.sh`); the first time, it points you at your EQ log folder
+(it looks in the usual Windows and Steam/Proton install locations) -- open it
+and choose "Use this folder as my log folder". `config/local.example.yaml`
+shows the optional settings, if you ever want any (copy it to
+`config/local.yaml`). The database is one file
 (`data/eqlogs.sqlite3` by default, gitignored), created with all its tables
 the first time anything opens it. To back it up, stop the app and copy
 that file.

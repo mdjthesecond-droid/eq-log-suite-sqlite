@@ -34,6 +34,17 @@
   <div class="live-picker-status">
     {% if picker.error %}
       <span class="live-picker-error">{{ picker.error }}</span>
+    {% elif not st and not picker.has_folder %}
+      <strong>First time here?</strong> Choose the folder your EQ logs are in:
+      {% for f in picker.suggested[:3] %}
+        <a href="/live-window/browse?dir={{ f.path|urlencode }}&next={{ picker.next|urlencode }}">{{ f.path }}</a>{% if not loop.last %} or {% endif %}
+      {% else %}
+        <a href="/live-window/browse?next={{ picker.next|urlencode }}">Browse&hellip;</a> to it
+      {% endfor %}
+      -- then "Use this folder as my log folder". (In game, <code>/log on</code> starts a log.)
+    {% elif not st and not picker.logs %}
+      No logs in your log folder yet -- in game, <code>/log on</code> starts one; then reload this page.
+      (Or <a href="/live-window/browse?next={{ picker.next|urlencode }}">Browse&hellip;</a> to a log somewhere else.)
     {% elif not st %}
       No log selected -- pick one and Load. Loading a log also records it into the database
       (only what isn't already there).

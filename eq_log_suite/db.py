@@ -21,18 +21,38 @@ import yaml
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = Path(os.environ.get("EQ_LOG_SUITE_CONFIG") or PROJECT_DIR / "config" / "local.yaml")
+# Only an explicitly requested config file has to exist; the default one is
+# optional -- see config().
+_CONFIG_REQUIRED = bool(os.environ.get("EQ_LOG_SUITE_CONFIG"))
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
 
 @functools.lru_cache
 def config() -> dict:
+    """config/local.yaml, or {} if there isn't one -- a fresh install runs on
+    defaults (database in data/) and the log folder is chosen inside the app
+    (see log_roots()), so nobody has to edit a file to get started."""
     if not CONFIG_PATH.exists():
-        raise FileNotFoundError(
-            f"{CONFIG_PATH} not found -- copy config/local.example.yaml to "
-            "config/local.yaml and point log_roots at your EQ log folders."
-        )
+        if _CONFIG_REQUIRED:
+            raise FileNotFoundError(f"{CONFIG_PATH} (from EQ_LOG_SUITE_CONFIG) not found")
+        return {}
     with open(CONFIG_PATH) as f:
         return yaml.safe_load(f) or {}
+
+
+def log_roots() -> dict[str, str]:
+    """Log folder per game code: the ones chosen in the app (Browse -> "use
+    this folder", stored in app_settings) over any `log_roots` in the config
+    file."""
+    roots = dict(config().get("log_roots") or {})
+    roots.update(get_setting("log_folders") or {})
+    return roots
+
+
+def set_log_folder(game_code: str, path: str):
+    folders = dict(get_setting("log_folders") or {})
+    folders[game_code] = path
+    set_setting("log_folders", folders)
 
 
 def enabled_games() -> set[str]:
@@ -43,13 +63,15 @@ def enabled_games() -> set[str]:
     the tailer when its folder doesn't exist. Defaults to every game with a
     log_roots entry."""
     cfg = config()
-    return set(cfg.get("enabled_games", (cfg.get("log_roots") or {}).keys()))
+    games = set(cfg.get("enabled_games", (cfg.get("log_roots") or {}).keys()))
+    # a folder chosen in the app is for a game that's being played
+    return games | set((get_setting("log_folders") or {}).keys())
 
 
 def enabled_log_roots() -> dict[str, str]:
     """log_roots filtered down to enabled_games -- the folders the picker's
     dropdown lists logs from."""
-    roots = config().get("log_roots") or {}
+    roots = log_roots()
     enabled = enabled_games()
     return {code: path for code, path in roots.items() if code in enabled}
 

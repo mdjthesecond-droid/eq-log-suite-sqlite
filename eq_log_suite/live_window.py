@@ -179,7 +179,7 @@ def _parser_for(path: str, game_code: str | None):
     if parser:
         return parser
     resolved = Path(path).resolve()
-    for code, root in (db.config().get("log_roots") or {}).items():
+    for code, root in db.log_roots().items():
         try:
             if resolved.is_relative_to(Path(root).resolve()):
                 return get_parser(code)
@@ -508,12 +508,41 @@ def list_logs() -> list[dict]:
     return logs
 
 
+def _game_for_folder(path: str) -> str:
+    """eql/eq from an install folder's name ("EverQuest Legends" vs "EverQuest")."""
+    return "eql" if "legend" in path.lower() else "eq"
+
+
+def suggested_log_folders() -> list[dict]:
+    """Existing Logs folders in the usual install locations -- Windows'
+    Daybreak default, and Steam/Proton prefixes on Linux -- for a first run
+    that hasn't chosen one yet. Newest activity first."""
+    import glob
+    home = Path.home()
+    patterns = [
+        r"C:\Users\Public\Daybreak Game Company\Installed Games\*\Logs",
+        r"C:\Program Files*\Daybreak Game Company\Installed Games\*\Logs",
+    ]
+    for steam in (home / ".local/share/Steam", home / ".steam/steam",
+                  home / ".var/app/com.valvesoftware.Steam/.local/share/Steam"):
+        patterns.append(str(steam / "steamapps/compatdata/*/pfx/drive_c/users/Public/"
+                            "Daybreak Game Company/Installed Games/*/Logs"))
+    found = {}
+    for pat in patterns:
+        for d in glob.glob(pat):
+            if os.path.isdir(d):
+                found[os.path.realpath(d)] = d
+    out = [{"path": d, "game": _game_for_folder(d), "mtime": os.path.getmtime(d)} for d in found.values()]
+    return sorted(out, key=lambda f: f["mtime"], reverse=True)
+
+
 def browse(directory: str | None) -> dict:
     """One folder's worth of the Browse view: subfolders and log files.
     Starts in the default log folder."""
     if not directory:
         roots = list(db.enabled_log_roots().values())
-        directory = roots[0] if roots else str(Path.home())
+        suggested = suggested_log_folders() if not roots else []
+        directory = roots[0] if roots else (suggested[0]["path"] if suggested else str(Path.home()))
     d = Path(directory).expanduser()
     try:
         entries = sorted(os.scandir(d), key=lambda e: e.name.lower())
@@ -525,4 +554,5 @@ def browse(directory: str | None) -> dict:
     logs = [_describe(e.path, False) for e in entries
             if e.is_file() and (e.name.lower().endswith(".txt") or ".txt." in e.name.lower())]
     logs.sort(key=lambda l: l["mtime"], reverse=True)
-    return {"dir": str(d), "parent": str(d.parent) if d.parent != d else None, "dirs": dirs, "logs": logs, "error": None}
+    return {"dir": str(d), "parent": str(d.parent) if d.parent != d else None, "dirs": dirs, "logs": logs, "error": None,
+            "game_guess": _game_for_folder(str(d)), "is_log_folder": str(d) in db.log_roots().values()}

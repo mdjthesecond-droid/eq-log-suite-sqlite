@@ -8,6 +8,18 @@ database; anything already recorded (e.g. from a copy of the same log) is skippe
 it stays in the picker's list.</p>
 
 <p><strong>{{ listing.dir }}</strong></p>
+{% if not listing.is_log_folder %}
+<form method="post" action="/live-window/log-folder" style="margin-bottom:1rem;">
+  <input type="hidden" name="dir" value="{{ listing.dir }}">
+  <input type="hidden" name="next" value="{{ next }}">
+  <button type="submit">Use this folder as my log folder</button> for
+  <select name="game">
+    <option value="eql" {% if listing.game_guess == 'eql' %}selected{% endif %}>EverQuest Legends</option>
+    <option value="eq" {% if listing.game_guess == 'eq' %}selected{% endif %}>EverQuest</option>
+  </select>
+  <span style="opacity:0.8;">-- the picker's list comes from here (nothing is read until you select a log).</span>
+</form>
+{% else %}<p style="opacity:0.8;">This is your log folder -- its logs are in the picker's list.</p>{% endif %}
 {% if listing.error %}<p class="live-picker-error">{{ listing.error }}</p>{% endif %}
 
 <h2>Logs here</h2>

@@ -3555,6 +3555,8 @@ def _picker_context(request: Request, error: str = "") -> dict:
         "logs": live_window.list_logs(),
         "last": live_window.last_selected(),
         "default_window": live_window.DEFAULT_WINDOW,
+        "has_folder": bool(db.enabled_log_roots()),
+        "suggested": [] if db.enabled_log_roots() else live_window.suggested_log_folders(),
         "tailer": tailer_service.current().status() if tailer_service.current() else None,
         "windows": live_window.WINDOWS,
         "error": error or request.query_params.get("picker_error", ""),
@@ -3578,6 +3580,16 @@ def live_window_select(
     # Drop the page's own time filters -- they belonged to the old window.
     path = target.split("?", 1)[0]
     return RedirectResponse(path, status_code=303)
+
+
+@app.post("/live-window/log-folder")
+def live_window_log_folder(dir: str = Form(...), game: str = Form(...), next: str = Form("/encounters")):
+    """Browse's "use this folder as my log folder" -- what the picker's
+    dropdown lists from then on. Stored in the database, not a file."""
+    if game not in ("eql", "eq") or not os.path.isdir(dir):
+        return RedirectResponse(_safe_next(next), status_code=303)
+    db.set_log_folder(game, dir)
+    return RedirectResponse(_safe_next(next).split("?", 1)[0], status_code=303)
 
 
 @app.get("/live-window/browse", response_class=HTMLResponse)
