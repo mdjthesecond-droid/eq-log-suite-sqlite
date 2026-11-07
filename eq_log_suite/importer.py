@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from eq_log_suite import coverage, db, facts, ingest
-from eq_log_suite.parsers.registry import detect_parser, get_parser
+from eq_log_suite.parsers.registry import game_for_log, get_parser
 
 BATCH_SIZE = 500
 
@@ -48,7 +48,7 @@ def guess_server_from_filename(path: str) -> str | None:
 
 def import_file(path: str, game_code: str | None, character_name: str | None, server: str | None, mark_live: bool = False):
     if game_code is None or game_code == "auto":
-        parser_cls = detect_parser(path)
+        parser_cls = game_for_log(path)
         if parser_cls is None:
             print(f"Could not auto-detect game for {path}; pass --game explicitly.", file=sys.stderr)
             sys.exit(1)

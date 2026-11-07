@@ -40,7 +40,7 @@ from pathlib import Path
 
 from eq_log_suite import db, ingest, sqlite_compat
 from eq_log_suite.importer import GAME_NAMES, guess_character_from_filename, guess_server_from_filename
-from eq_log_suite.parsers.registry import detect_parser, get_parser
+from eq_log_suite.parsers.registry import game_for_log, get_parser
 
 WINDOWS = {
     "now": "From now on",
@@ -174,18 +174,9 @@ def _count_lines_before(f, offset: int) -> int:
 def _parser_for(path: str, game_code: str | None):
     if game_code:
         return get_parser(game_code)
-    # An empty or brand-new file can't be sniffed -- fall back to whichever
-    # configured log folder it's in.
-    parser = detect_parser(path) if os.path.getsize(path) else None
+    parser = game_for_log(path)
     if parser:
         return parser
-    resolved = Path(path).resolve()
-    for code, root in db.log_roots().items():
-        try:
-            if resolved.is_relative_to(Path(root).resolve()):
-                return get_parser(code)
-        except OSError:
-            continue
     raise ValueError(f"Can't tell which game {Path(path).name} is from -- it's empty and not in a configured log folder.")
 
 

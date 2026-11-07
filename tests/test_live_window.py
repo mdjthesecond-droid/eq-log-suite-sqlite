@@ -220,6 +220,32 @@ def test_oddly_named_copy_with_confirmed_character_adds_nothing():
         assert "already recorded as Recorder" in str(e)
 
 
+def test_recorded_log_keeps_its_game_when_sniffing_would_flip():
+    # Real 2026-11-07: an EQ Legends log grew task lines (only the classic-EQ
+    # parser knows them), sniffing flipped to EverQuest, and reselecting it
+    # recorded lines under a second, EverQuest "Cheerful".
+    from eq_log_suite.parsers.registry import detect_parser
+    d = TMP / "elsewhere"           # not a configured log folder: only the record can tell
+    d.mkdir()
+    log = d / "eqlog_Tasker_qeynos.txt"
+    base = datetime.now() - timedelta(hours=1)
+    log.write_bytes(line(base, "You have entered Kerra Isle."))
+    lw.select(str(log), "all")
+    with open(log, "ab") as f:
+        for i in range(3):
+            f.write(line(base + timedelta(seconds=10 + i), "You have been assigned the task 'Aid the Kerrans of Kerra Isle'."))
+    assert detect_parser(str(log)).game_code == "eq"     # sniffing alone gets it wrong now
+    lw.select(str(log), "all")
+    conn = lw.db.get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT g.code, COUNT(*) n FROM characters c JOIN games g ON g.id=c.game_id "
+                        "WHERE c.name='Tasker' GROUP BY g.code")
+            assert [(r["code"], r["n"]) for r in cur.fetchall()] == [("eql", 1)]
+    finally:
+        conn.close()
+
+
 def test_live_connection_sees_both_databases():
     conn = lw.connection()
     try:
