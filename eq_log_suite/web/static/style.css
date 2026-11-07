@@ -99,3 +99,13 @@ pre { white-space: pre-wrap; word-break: break-word; background: #1c1f29; paddin
 .dlg-trade_complete { color: #7fd88f; }
 .dlg-exp { color: #7fd88f; }
 .dlg-faction { color: #7fd88f; }
+
+/* Live log picker bar (templates/_live_picker.html) */
+.live-picker {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem;
+  padding: 0.6rem 0.8rem; margin: 0.5rem 0 1rem;
+  border: 1px solid rgba(127, 127, 127, 0.35); border-radius: 6px;
+}
+.live-picker select { max-width: 32rem; }
+.live-picker-status { flex-basis: 100%; font-size: 0.9rem; opacity: 0.85; }
+.live-picker-error { color: #d9534f; }

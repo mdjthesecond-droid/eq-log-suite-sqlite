@@ -1,0 +1,46 @@
+{# Live log picker bar -- one log over one time window (see live_window.py).
+   Expects `picker` from app.py's _picker_context(). #}
+{% set st = picker.state %}
+<form class="live-picker" method="post" action="/live-window/select">
+  <input type="hidden" name="next" value="{{ picker.next }}">
+  <label>Log
+    <select name="log_path">
+      {% if st and st.path and st.path not in picker.logs|map(attribute='path') %}
+      <option value="{{ st.path }}" selected>{{ st.file_name }}</option>
+      {% endif %}
+      {% for l in picker.logs %}
+      <option value="{{ l.path }}" {% if st and l.path == st.path %}selected{% endif %}>
+        {{ l.name }} -- {{ l.mtime.strftime('%a %b %d %H:%M') }}{% if not l.in_default_folder %} (elsewhere){% endif %}
+      </option>
+      {% endfor %}
+      {% if not picker.logs and not (st and st.path) %}
+      <option value="" disabled selected>no logs in the default folder -- use Browse</option>
+      {% endif %}
+    </select>
+  </label>
+  <a href="/live-window/browse?next={{ picker.next|urlencode }}">Browse&hellip;</a>
+  <label>Window
+    <select name="window">
+      {% for key, label in picker.windows.items() %}
+      <option value="{{ key }}" {% if st and st.window == key %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit">Load</button>
+  <div class="live-picker-status">
+    {% if picker.error %}
+      <span class="live-picker-error">{{ picker.error }}</span>
+    {% elif not st %}
+      Nothing loaded yet -- pick a log and window.
+    {% elif st.missing %}
+      <span class="live-picker-error">{{ st.path }} is gone (moved or deleted) -- pick another log or Browse to it.</span>
+    {% else %}
+      Viewing <strong>{{ st.character_name or '?' }}{% if st.server %} ({{ st.server }}){% endif %}</strong>
+      &middot; {{ st.file_name }} &middot; {{ st.window_label }}
+      {% if st.cutoff_dt %}(since {{ st.cutoff_dt.strftime('%a %b %d %H:%M') }}){% endif %}
+      &middot; {{ '{:,}'.format(st.event_count) }} event{{ '' if st.event_count == 1 else 's' }}
+      {% if st.last_ts %}&middot; latest {{ st.last_ts[:19] }}{% endif %}
+      &middot; loaded in {{ st.load_seconds }}s
+    {% endif %}
+  </div>
+</form>

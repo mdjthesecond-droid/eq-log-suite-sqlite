@@ -93,6 +93,33 @@ def get_connection():
     return sqlite_compat.Connection(str(sqlite_path()))
 
 
+def get_setting(key: str, default=None):
+    import json
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM app_settings WHERE key=%s", (key,))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    return json.loads(row["value"]) if row and row["value"] is not None else default
+
+
+def set_setting(key: str, value):
+    import json
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO app_settings (key, value) VALUES (%s, %s) "
+                "ON DUPLICATE KEY UPDATE value=VALUES(value)",
+                (key, json.dumps(value)),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_or_create_game(conn, code: str, name: str) -> int:
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM games WHERE code=%s", (code,))

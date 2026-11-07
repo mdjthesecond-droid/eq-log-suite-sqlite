@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from eq_log_suite import db
+from eq_log_suite import db, live_window
 from eq_log_suite.overlay import boxes as overlay_boxes
 from eq_log_suite.parsers.base import GameParser
 
@@ -2431,7 +2431,7 @@ def _compute_encounters(character="", start_ts="", end_ts="", npc="", limit=30, 
         clauses.append("ev.ts <= %s"); params.append(end_ts)
     where = f"AND {' AND '.join(clauses)}" if clauses else ""
 
-    conn = db.get_connection()
+    conn = live_window.connection()
     try:
         with conn.cursor() as cur:
             # Regular activity: extends the encounter, subject to the
@@ -2630,57 +2630,22 @@ def api_encounters(character: str = "", start_ts: str = "", end_ts: str = "", np
     return JSONResponse(_compute_encounters(character, start_ts, end_ts, npc, limit))
 
 
-def _known_logs():
-    # Powers the log picker on /encounters -- lets you pick a bounded window
-    # by log instead of guessing a date range blind. file_mtime comes from
-    # the filesystem (matches discovery.py's live-file resolution), not the
-    # DB, so it reflects reality even if the tailer's been down a while.
-    # MIN/MAX/COUNT as correlated subqueries per log_source, rather than a
-    # single LEFT JOIN + GROUP BY over all of `events` -- the reverse of the
-    # per-row correlated-subquery antipattern elsewhere in this file: here
-    # the outer table (log_sources) has a handful of rows, so a subquery
-    # per row is cheap, while the GROUP BY version still had to aggregate
-    # every one of ~2.65M event rows to produce the same numbers (confirmed
-    # real, 2026-09-07: 6.7s vs. 0.9s for the same result on the same data).
-    conn = db.get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT ls.id, ls.file_path, ls.last_parsed_at, ls.live, "
-                "c.name AS character_name, g.code AS game, "
-                "(SELECT MIN(ts) FROM events WHERE log_source_id=ls.id) AS first_event_ts, "
-                "(SELECT MAX(ts) FROM events WHERE log_source_id=ls.id) AS last_event_ts, "
-                "(SELECT COUNT(*) FROM events WHERE log_source_id=ls.id) AS event_count "
-                "FROM log_sources ls "
-                "JOIN characters c ON ls.character_id=c.id "
-                "JOIN games g ON ls.game_id=g.id"
-            )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
-
-    logs = []
-    for r in rows:
-        try:
-            file_mtime = datetime.fromtimestamp(os.path.getmtime(r["file_path"]))
-        except OSError:
-            file_mtime = None
-        logs.append({**r, "file_mtime": file_mtime})
-    logs.sort(key=lambda l: l["file_mtime"] or datetime.min, reverse=True)
-    return logs
-
-
 @app.get("/encounters", response_class=HTMLResponse)
 def encounters_browse(
     request: Request, character: str = "", start_ts: str = "", end_ts: str = "", npc: str = "",
     limit: int = 200, order: str = "desc",
 ):
     limit = max(0, min(limit, 5000))
-    # Defaults to showing nothing until a log + date range is picked -- an
-    # unbounded fetch here means pulling every combat event in the DB into
-    # Python before merging (already ~240k rows after under a month of
-    # play), so "run automatically on page load" doesn't scale.
-    ready = bool(character and start_ts and end_ts)
+    # Reads the Live window (live_window.py) -- one log over the picker's
+    # time range, already bounded, so it can run on page load. character /
+    # start / end are optional narrowing within it; they default to the
+    # window's own character and start.
+    window = live_window.state()
+    if window and not window.get("missing"):
+        character = character or window.get("character_name") or ""
+        if not start_ts and window.get("cutoff_dt"):
+            start_ts = window["cutoff_dt"].isoformat(timespec="seconds")
+    ready = bool(window) and not window.get("missing")
     encounters = []
     totals = {"count": 0, "damage_out": 0, "damage_in": 0, "healing_out": 0, "healing_in": 0, "kills": 0, "duration_s": 0}
     if ready:
@@ -2699,7 +2664,7 @@ def encounters_browse(
         "encounters": encounters,
         "totals": totals,
         "ready": ready,
-        "known_logs": _known_logs(),
+        "picker": _picker_context(request),
         "filters": {"character": character, "start_ts": start_ts, "end_ts": end_ts, "npc": npc, "limit": limit, "order": order},
     })
 
@@ -2784,7 +2749,7 @@ def _compute_encounter_combat_breakdown(windows, label_self_as_you=True):
             return True
         return False
 
-    conn = db.get_connection()
+    conn = live_window.connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -2937,9 +2902,14 @@ def _compute_encounter_combat_breakdown(windows, label_self_as_you=True):
         return row
 
     verb_rows = [shape(b) for b in buckets.values()]
-    verb_rows.sort(key=lambda r: (r["npc"], r["combatant"], r["direction"], -r["attempts"]))
+    # total_damage then verb break attempt-count ties -- without them, tied
+    # rows (e.g. two abilities used 6 times each) came out in whatever order
+    # the database returned them.
+    verb_rows.sort(key=lambda r: (r["npc"], r["combatant"], r["direction"], -r["attempts"],
+                                  -r["total_damage"], (r.get("verb") or "").lower()))
     totals_rows = [shape(b) for b in totals_buckets.values()]
-    totals_rows.sort(key=lambda r: (r["combatant"], r["direction"], -r["attempts"]))
+    totals_rows.sort(key=lambda r: (r["combatant"], r["direction"], -r["attempts"],
+                                    -r["total_damage"], (r.get("verb") or "").lower()))
     return verb_rows, npc_totals, totals_rows
 
 
@@ -2972,7 +2942,7 @@ def _compute_encounter_healing_breakdown(windows, label_self_as_you=True):
         params.extend(wparams)
     where = " OR ".join(clauses)
 
-    conn = db.get_connection()
+    conn = live_window.connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -3056,7 +3026,7 @@ def _compute_encounter_procs(windows):
         params.extend(wparams)
     where = " OR ".join(clauses)
 
-    conn = db.get_connection()
+    conn = live_window.connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -3417,7 +3387,7 @@ def api_encounter_detail(character: str, start_ts: str, stop_ts: str = ""):
     # wasteful multiplied across dozens of list rows. Aggregated in Python
     # since per-encounter event volume is small and it avoids a much uglier
     # multi-way-pivot SQL query.
-    conn = db.get_connection()
+    conn = live_window.connection()
     try:
         with conn.cursor() as cur:
             clauses = [
@@ -3553,7 +3523,7 @@ def api_encounter_log(character: str, start_ts: str, stop_ts: str = "", mob: str
         clauses.append("(ev.source_name = %s OR ev.target_name = %s)")
         params.extend([mob, mob])
 
-    conn = db.get_connection()
+    conn = live_window.connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -3566,6 +3536,52 @@ def api_encounter_log(character: str, start_ts: str, stop_ts: str = "", mob: str
         conn.close()
 
     return JSONResponse([{"ts": r["ts"].isoformat(), "raw_line": r["raw_line"]} for r in rows])
+
+
+def _safe_next(next_url: str) -> str:
+    # Only ever redirect back within this app.
+    return next_url if next_url.startswith("/") and not next_url.startswith("//") else "/encounters"
+
+
+def _picker_context(request: Request, error: str = "") -> dict:
+    """Everything the Live log picker bar (_live_picker.html) shows."""
+    try:
+        window = live_window.state()
+    except Exception as e:  # unreadable/unidentifiable remembered log -- still show the picker
+        window, error = {}, error or f"{type(e).__name__}: {e}"
+    here = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+    return {
+        "state": window,
+        "logs": live_window.list_logs(),
+        "windows": live_window.WINDOWS,
+        "error": error or request.query_params.get("picker_error", ""),
+        "next": here,
+    }
+
+
+@app.post("/live-window/select")
+def live_window_select(log_path: str = Form(...), window: str = Form(live_window.DEFAULT_WINDOW), next: str = Form("/encounters")):
+    target = _safe_next(next)
+    try:
+        live_window.select(log_path, window)
+    except (ValueError, OSError) as e:
+        sep = "&" if "?" in target else "?"
+        return RedirectResponse(f"{target}{sep}picker_error={quote(str(e))}", status_code=303)
+    # Drop the page's own time filters -- they belonged to the old window.
+    path = target.split("?", 1)[0]
+    return RedirectResponse(path, status_code=303)
+
+
+@app.get("/live-window/browse", response_class=HTMLResponse)
+def live_window_browse(request: Request, dir: str = "", next: str = "/encounters", window: str = ""):
+    listing = live_window.browse(dir or None)
+    current = live_window.state() if not window else {}
+    return templates.TemplateResponse(request, "live_browse.html", {
+        "listing": listing,
+        "next": _safe_next(next),
+        "window": window or (current.get("window") if current else "") or live_window.DEFAULT_WINDOW,
+        "windows": live_window.WINDOWS,
+    })
 
 
 @app.get("/live", response_class=HTMLResponse)

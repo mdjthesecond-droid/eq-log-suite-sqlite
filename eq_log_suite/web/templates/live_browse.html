@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Browse for a log{% endblock %}
+{% block content %}
+<h1>Browse for a log</h1>
+<p style="opacity:0.8;">Pick any <code>eqlog_*</code> file -- an archived or rotated log, another
+character's, a friend's. It's opened in the Live view only; nothing is added to the database.
+Once opened, it stays in the picker's list.</p>
+
+<p><strong>{{ listing.dir }}</strong></p>
+{% if listing.error %}<p class="live-picker-error">{{ listing.error }}</p>{% endif %}
+
+<form method="post" action="/live-window/select">
+  <input type="hidden" name="next" value="{{ next }}">
+  <label>Window
+    <select name="window">
+      {% for key, label in windows.items() %}
+      <option value="{{ key }}" {% if key == window %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+
+  <h2>Logs here</h2>
+  {% if listing.logs %}
+  <table>
+    <thead><tr><th>file</th><th>character</th><th>server</th><th>size</th><th>last written</th><th></th></tr></thead>
+    <tbody>
+      {% for l in listing.logs %}
+      <tr>
+        <td>{{ l.name }}</td>
+        <td>{{ l.character or '' }}</td>
+        <td>{{ l.server or '' }}</td>
+        <td>{{ '{:,.1f}'.format(l.size / 1048576) }} MB</td>
+        <td>{{ l.mtime.strftime('%a %b %d %Y %H:%M') }}</td>
+        <td><button type="submit" name="log_path" value="{{ l.path }}">Open</button></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="opacity:0.8;">No eqlog_* files in this folder.</p>
+  {% endif %}
+</form>
+
+<h2>Folders</h2>
+<ul>
+  {% if listing.parent %}
+  <li><a href="/live-window/browse?dir={{ listing.parent|urlencode }}&next={{ next|urlencode }}&window={{ window }}">&uarr; up</a></li>
+  {% endif %}
+  {% for d in listing.dirs %}
+  <li><a href="/live-window/browse?dir={{ d|urlencode }}&next={{ next|urlencode }}&window={{ window }}">{{ d.rsplit('/', 1)[-1].rsplit('\\', 1)[-1] }}/</a></li>
+  {% endfor %}
+</ul>
+<p><a href="{{ next }}">&larr; back</a></p>
+{% endblock %}

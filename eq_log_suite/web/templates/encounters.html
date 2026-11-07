@@ -2,55 +2,20 @@
 {% block title %}Encounters{% endblock %}
 {% block content %}
 <h1>Encounters</h1>
-<p>Full encounter history (not just the live session) -- filter by character and/or a date range
-to work through a whole day or an entire imported log. See <a href="/live">Live</a> for the
-real-time "active encounter" view of the last 40. Each encounter is named after the first mob you
-engaged, since same-named mobs can't be told apart from log text alone, "mob" here just means
-"whichever name is on the other end of a combat line" -- so a duo partner's name can occasionally
-show up in the mob list too. Boundaries are usually automatic (a gap in activity, or a hard stop
-like death/escape/zone-change), but for dummy/gear-testing -- same mob, no death involved -- say
-<code>Encounter Start</code> / <code>Encounter Stop</code> in-game to force a split.</p>
+{% include "_live_picker.html" %}
+<p style="opacity:0.8;">Encounters in the loaded log and window above -- change either with the
+picker. Each encounter is named after the first mob you engaged, since same-named mobs can't be
+told apart from log text alone, "mob" here just means "whichever name is on the other end of a
+combat line" -- so a duo partner's name can occasionally show up in the mob list too. Boundaries
+are usually automatic (a gap in activity, or a hard stop like death/escape/zone-change), but for
+dummy/gear-testing -- same mob, no death involved -- say <code>Encounter Start</code> /
+<code>Encounter Stop</code> in-game to force a split.</p>
 
-<h2>Pick a log</h2>
-<p style="opacity:0.8;">Click a log below to load its full date range, or set your own filters.
-A log/date range is required before anything queries -- an unbounded fetch here means pulling
-every combat event in the database into Python first, which stops scaling once there's more than
-a few weeks of history.</p>
-<div class="scroll-frame">
-<table class="sortable">
-  <thead>
-    <tr>
-      <th>character</th><th>game</th><th>file</th><th>events</th>
-      <th>first event</th><th>last event</th><th>file last modified</th><th>live</th><th></th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for log in known_logs %}
-    <tr>
-      <td>{{ log.character_name }}</td>
-      <td>{{ log.game }}</td>
-      <td style="font-size:0.85rem;">{{ log.file_path }}</td>
-      <td>{{ log.event_count }}</td>
-      <td>{{ log.first_event_ts if log.first_event_ts is not none else '' }}</td>
-      <td>{{ log.last_event_ts if log.last_event_ts is not none else '' }}</td>
-      <td>{{ log.file_mtime if log.file_mtime is not none else '(file not found)' }}</td>
-      <td>{{ 'yes' if log.live else '' }}</td>
-      <td>
-        {% if log.first_event_ts and log.last_event_ts %}
-        <a href="/encounters?character={{ log.character_name }}&start_ts={{ log.first_event_ts.isoformat() }}&end_ts={{ log.last_event_ts.isoformat() }}">load full range</a>
-        {% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-</div>
-
-<h2>Filter</h2>
+<h2>Narrow down</h2>
 <form method="get" action="/encounters">
-  <input name="character" placeholder="character (required)" value="{{ filters.character }}" required>
-  <input id="start-ts-input" name="start_ts" type="datetime-local" title="start (required)" value="{{ filters.start_ts }}" required>
-  <input id="end-ts-input" name="end_ts" type="datetime-local" title="end (required)" value="{{ filters.end_ts }}" required>
+  <input name="character" placeholder="character" title="defaults to the loaded log's character" value="{{ filters.character }}">
+  <input id="start-ts-input" name="start_ts" type="datetime-local" step="1" title="from (defaults to the window's start)" value="{{ filters.start_ts }}">
+  <input id="end-ts-input" name="end_ts" type="datetime-local" step="1" title="to (blank = up to now)" value="{{ filters.end_ts }}">
   <button type="button" id="today-btn" title="fill start/end with today, 00:00 to now">Today</button>
   <input name="npc" placeholder="npc name (optional, e.g. Vox)" value="{{ filters.npc }}">
   <input name="limit" type="number" min="0" max="5000" title="max results (0 = unlimited)" value="{{ filters.limit }}" style="width:90px;">
@@ -62,7 +27,7 @@ a few weeks of history.</p>
 </form>
 
 {% if not ready %}
-<p style="opacity:0.8;">Pick a log above, or set character + start + end, to see encounters.</p>
+<p style="opacity:0.8;">Pick a log and window above to see encounters.</p>
 {% else %}
 <p style="opacity:0.8;">
   {{ totals.count }} encounter(s) -- {{ totals.damage_out|round|int }} dmg out /

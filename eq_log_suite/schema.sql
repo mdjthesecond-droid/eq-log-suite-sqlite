@@ -146,6 +146,14 @@ CREATE TABLE IF NOT EXISTS zone_start_overrides (
     confirmed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'localtime'))
 );
 
+-- Small app state that should survive restarts and travel with the
+-- database: the log picker's remembered log, its "Now" session start, the
+-- recently browsed logs. value is JSON.
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT NOT NULL PRIMARY KEY,
+    value TEXT NULL
+);
+
 -- indexes
 CREATE INDEX IF NOT EXISTS idx_game_ts ON events (game_id, ts);
 CREATE INDEX IF NOT EXISTS idx_char_ts ON events (character_id, ts);

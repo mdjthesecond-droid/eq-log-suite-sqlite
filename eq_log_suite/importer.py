@@ -20,16 +20,26 @@ BATCH_SIZE = 500
 GAME_NAMES = {"eql": "EverQuest Legends", "eq": "EverQuest"}
 
 
+def _log_base_name(path: str) -> str:
+    """eqlog_<Character>_<Server>, with the .txt and anything after it
+    dropped -- so a rotated copy like eqlog_Cheerful_rivervale.txt.20260922-161113
+    names the same character/server as the live file (Path.stem alone
+    leaves 'rivervale.txt' as the server)."""
+    name = Path(path).name
+    i = name.lower().find(".txt")
+    return name[:i] if i >= 0 else Path(path).stem
+
+
 def guess_character_from_filename(path: str) -> str | None:
     # classic EQ naming: eqlog_<Character>_<Server>.txt
-    parts = Path(path).stem.split("_")
+    parts = _log_base_name(path).split("_")
     if len(parts) >= 2 and parts[0].lower() == "eqlog":
         return parts[1]
     return None
 
 
 def guess_server_from_filename(path: str) -> str | None:
-    parts = Path(path).stem.split("_")
+    parts = _log_base_name(path).split("_")
     if len(parts) >= 3 and parts[0].lower() == "eqlog":
         return "_".join(parts[2:])
     return None

@@ -29,7 +29,25 @@ from eq_log_suite.parsers.registry import get_parser
 
 POLL_INTERVAL = 0.25
 DEFAULT_SOCKET_PATH = "/tmp/eq_log_suite_overlay.sock"
-DISCOVERY_INTERVAL_SECONDS = 300  # re-scan for new/rotated log files every 5 minutes
+# Re-scan for new log files this often. Cheap (a folder listing plus one
+# small query), and it's how a log that appears after the tailer started
+# -- the game launched later, or /log turned on mid-session -- gets picked
+# up, so it needs to be seconds, not minutes.
+DISCOVERY_INTERVAL_SECONDS = 5
+# While idle at the end of a log, how often to check whether the path now
+# points at a different file than the one open (see _replaced).
+FILE_IDENTITY_CHECK_SECONDS = 2
+
+
+def _replaced(path, f) -> bool:
+    """True if `path` now names a different file than the open handle `f`.
+    A missing path is not "replaced" -- nothing to switch to yet."""
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return False
+    cur = os.fstat(f.fileno())
+    return (st.st_dev, st.st_ino) != (cur.st_dev, cur.st_ino)
 # The web UI's "rescan now" button sends SIGUSR1 to this PID to wake the
 # discovery loop immediately instead of waiting for the next timer tick --
 # see eq_log_suite.web.app's /import/rescan route.
@@ -383,12 +401,23 @@ async def tail_log_source(conn, log_source, broadcaster: OverlayBroadcaster):
     rotation_settings_refreshed_at = time.monotonic()
 
     f = open(path, "rb")
+    size_now = os.fstat(f.fileno()).st_size
+    if size_now < offset:
+        # The file at this path is smaller than where we left off: it was
+        # replaced (old log moved away, a fresh one started) or truncated.
+        # Seeking to the old offset would silently skip everything until the
+        # new file grew past it -- start over from the beginning instead.
+        print(f"[tailer] {path} is smaller than its saved position ({size_now} < {offset} bytes) -- "
+              "treating it as a new file and reading from the start")
+        offset = 0
+        db.update_log_source_offset(conn, log_source_id, 0)
     try:
         prefix = f.read(offset)
         line_no = prefix.count(b"\n")
         f.seek(offset)
 
         print(f"[tailer] watching {path} from byte {offset} (line {line_no})")
+        last_identity_check = time.monotonic()
         while True:
             now = time.monotonic()
             if now - rotation_settings_refreshed_at > ROTATION_SETTINGS_REFRESH_SECONDS:
@@ -429,6 +458,18 @@ async def tail_log_source(conn, log_source, broadcaster: OverlayBroadcaster):
             if not line_bytes or not line_bytes.endswith(b"\n"):
                 # partial line (still being written) or EOF -- rewind and wait
                 f.seek(pos_before)
+                if now - last_identity_check >= FILE_IDENTITY_CHECK_SECONDS:
+                    last_identity_check = now
+                    if _replaced(path, f):
+                        # The log was moved/deleted and a new file started at
+                        # the same path -- we'd otherwise keep reading the old
+                        # (unlinked) file forever and never see the new one.
+                        print(f"[tailer] {path} was replaced by a new file -- reading it from the start")
+                        f.close()
+                        f = open(path, "rb")
+                        offset, line_no = 0, 0
+                        db.update_log_source_offset(conn, log_source_id, 0)
+                        continue
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
 
@@ -557,6 +598,18 @@ async def discovery_loop(eql_root, eq_root, broadcaster, running_log_source_ids,
 
         try:
             new_sources = discovery.scan_and_import(eql_root, eq_root)
+            # Plus already-known live logs that exist but aren't being
+            # tailed -- a file that was missing at startup and has come
+            # back (same name), which scan_and_import skips as "tracked".
+            conn = db.get_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT * FROM log_sources WHERE live=1")
+                    idle = [ls for ls in cur.fetchall()
+                            if ls["id"] not in running_log_source_ids and os.path.isfile(ls["file_path"])]
+            finally:
+                conn.close()
+            new_sources = list(new_sources) + [ls for ls in idle if ls["id"] not in {n["id"] for n in new_sources}]
         except Exception as e:
             print(f"[tailer] discovery scan failed: {type(e).__name__}: {e}")
             continue
@@ -610,12 +663,24 @@ async def main_async(
     conn.commit()
     conn.close()
 
-    if not live_sources:
+    # Live rows whose file is gone (moved to an archive, deleted) can't be
+    # tailed -- skip them here instead of starting a task that just dies.
+    missing = [ls for ls in live_sources if not os.path.isfile(ls["file_path"])]
+    for ls in missing:
+        print(f"[tailer] skipping {ls['file_path']}: file no longer exists")
+    live_sources = [ls for ls in live_sources if ls not in missing]
+
+    if not live_sources and not (eql_root or eq_root):
         print(
-            "No log_sources marked live=1 and none discovered. Run the importer with "
-            "--live on a file first, or check log_roots in config/local.yaml."
+            "No log files to tail and no log_roots configured to watch for new ones -- "
+            "set log_roots in config/local.yaml."
         )
         return
+    if not live_sources:
+        # Normal for a fresh install, or when the tailer starts before the
+        # game has written a log: keep running and let discovery_loop pick
+        # the log up the moment it appears.
+        print(f"[tailer] no log files yet -- watching for new ones every {DISCOVERY_INTERVAL_SECONDS}s")
 
     broadcaster = OverlayBroadcaster()
     await broadcaster.start(socket_path)
