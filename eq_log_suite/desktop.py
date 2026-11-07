@@ -101,7 +101,17 @@ def main(argv=None):
         return
 
     api = Api(base)
-    webview.create_window(TITLE, base + START_PAGE, width=1400, height=900, js_api=api)
+    window = webview.create_window(TITLE, base + START_PAGE, width=1400, height=900, js_api=api)
+    if os.environ.get("EQLS_SMOKE_TEST"):
+        # Checks a build end to end: the page really rendered in the window
+        # and the page-to-app bridge is there. Prints the result and exits.
+        def smoke():
+            ok = window.events.loaded.wait(60)
+            title = window.evaluate_js("document.title") if ok else None
+            bridge = window.evaluate_js("typeof window.pywebview") if ok else None
+            print(f"SMOKE TEST: loaded={ok} title={title!r} bridge={bridge!r}", flush=True)
+            window.destroy()
+        threading.Thread(target=smoke, daemon=True).start()
     # Qt on Linux (installed by requirements.txt); pywebview picks Edge on Windows.
     gui = "qt" if sys.platform.startswith("linux") else None
     # Private: no browser profile on disk. Nothing needs one (settings live in

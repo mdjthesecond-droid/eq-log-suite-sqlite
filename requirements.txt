@@ -9,3 +9,5 @@ pywebview
 qtpy; sys_platform == "linux"
 PyQt6; sys_platform == "linux"
 PyQt6-WebEngine; sys_platform == "linux"
+# Windows has no system time zone database for zoneinfo (tailer.py's rotation times).
+tzdata; sys_platform == "win32"

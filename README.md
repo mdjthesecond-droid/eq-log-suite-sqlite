@@ -229,6 +229,30 @@ log has been moved or deleted):
 .venv/bin/python -m eq_log_suite.facts
 ```
 
+## Packaging the app (no Python needed to run it)
+
+```bash
+.venv/bin/pip install pyinstaller
+.venv/bin/pyinstaller --noconfirm packaging/eq-log-suite.spec
+```
+
+That makes `dist/EQ Log Suite/` -- one folder to zip up and share; run
+`EQ Log Suite` (`EQ Log Suite.exe` on Windows) inside it. It's the app
+window (`start-app.sh`) with Python and everything else bundled: ~590 MB on
+Linux, mostly Qt WebEngine (Windows uses the built-in Edge WebView2
+instead, so it's much smaller). Build on the system you're building for --
+a Windows build has to be made on Windows.
+
+A packaged app keeps its config and database in a per-user folder, not
+next to itself (so updating is just replacing the folder):
+`%LOCALAPPDATA%\EQ Log Suite` on Windows, `~/.local/share/eq-log-suite` on
+Linux. To check a build actually works -- the page renders in the window
+and talks to the app -- run it with `EQLS_SMOKE_TEST=1`; it prints
+`SMOKE TEST: loaded=True ...` and exits.
+
+The in-game overlays (MangoHud alerts, the Vulkan layer and its companion)
+aren't part of the packaged app; they're Linux-only and run from source.
+
 ## Extending to a new game
 
 1. Get a real log sample (enable in-game logging, play a bit).

@@ -20,7 +20,26 @@ from pathlib import Path
 import yaml
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
-CONFIG_PATH = Path(os.environ.get("EQ_LOG_SUITE_CONFIG") or PROJECT_DIR / "config" / "local.yaml")
+
+
+def _data_root() -> Path:
+    """Where config/ and data/ live: the project folder when run from
+    source; a per-user folder when run as a packaged app (PyInstaller --
+    packaging/), whose own folder is read-only and replaced on every update:
+    %LOCALAPPDATA%\\EQ Log Suite on Windows, ~/Library/Application Support/EQ
+    Log Suite on macOS, $XDG_DATA_HOME/eq-log-suite (~/.local/share) on Linux."""
+    import sys
+    if not getattr(sys, "frozen", False):
+        return PROJECT_DIR
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "EQ Log Suite"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "EQ Log Suite"
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "eq-log-suite"
+
+
+DATA_ROOT = _data_root()
+CONFIG_PATH = Path(os.environ.get("EQ_LOG_SUITE_CONFIG") or DATA_ROOT / "config" / "local.yaml")
 # Only an explicitly requested config file has to exist; the default one is
 # optional -- see config().
 _CONFIG_REQUIRED = bool(os.environ.get("EQ_LOG_SUITE_CONFIG"))
@@ -78,7 +97,7 @@ def enabled_log_roots() -> dict[str, str]:
 
 def sqlite_path() -> Path:
     p = Path((config().get("database") or {}).get("path") or "data/eqlogs.sqlite3").expanduser()
-    return p if p.is_absolute() else PROJECT_DIR / p
+    return p if p.is_absolute() else DATA_ROOT / p
 
 
 def apply_schema(raw_conn, include_indexes: bool = True):
