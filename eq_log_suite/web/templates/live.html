@@ -277,7 +277,14 @@ imported log -- see <a href="/encounters">Encounters</a>.</p>
     }
   }
 
+  let polling = false;
   async function poll() {
+    if (polling) return;   // a slow catch-up must not overlap the next tick
+    polling = true;
+    try { await pollOnce(); } finally { polling = false; }
+  }
+
+  async function pollOnce() {
     const res = await fetch(`/api/events/since/${lastId}`);
     const data = await res.json();
     // Another log/window was loaded (picker, another tab, app restart):
@@ -467,6 +474,13 @@ imported log -- see <a href="/encounters">Encounters</a>.</p>
   setInterval(poll, 1000);
   setInterval(renderActive, 250);
   setInterval(loadEncounters, 10000);
+  // A tab (or window) hidden behind a fullscreen game gets its timers frozen
+  // by the browser -- confirmed real, 2026-11-07: no polls at all for minutes.
+  // Catch up the moment it's looked at again.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") { poll(); loadEncounters(); }
+  });
+  window.addEventListener("focus", () => { poll(); loadEncounters(); });
   poll();
   loadEncounters();
 </script>

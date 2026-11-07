@@ -91,6 +91,14 @@ def main(argv=None):
         server, thread = _start_server(port)
         base = f"http://{HOST}:{port}"
 
+    if sys.platform.startswith("linux"):
+        # Chromium (inside Qt WebEngine) freezes timers in a window that's
+        # hidden or covered -- e.g. by a fullscreen game -- which stops /live
+        # polling, so the meter stalls (confirmed real with a browser tab,
+        # 2026-11-07). This window is meant to sit behind the game, so don't.
+        flags = "--disable-background-timer-throttling --disable-renderer-backgrounding " \
+                "--disable-backgrounding-occluded-windows"
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "") + " " + flags).strip()
     try:
         import webview
     except ImportError:
