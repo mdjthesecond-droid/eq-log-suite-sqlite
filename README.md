@@ -74,8 +74,13 @@ to re-run -- they check what's already running before starting anything
 new. Logs from each go to `logs/web.log`, `logs/overlay.log`,
 `logs/mangohud_alerts.log`.
 
+- **App window** (`start-app.sh`) -- the app in its own window instead of
+  a browser tab (pywebview: Qt WebEngine on Linux, Edge WebView2 on
+  Windows). Pages that open a new tab open another app window. Closing the
+  last window stops the app. If it's already running, this just opens a
+  window onto it.
 - **App** (`start-web.sh`) -- starts the app (if not already running) at
-  http://localhost:8000 and opens it. This is the normal one to run when you
+  http://localhost:8000 and opens it in your browser. This is the normal one to run when you
   play: select your log on `/encounters` and it records and follows it --
   the tailer runs inside the app, there's nothing separate to start.
 - **Overlay** (`start-overlay.sh`) -- starts the app plus the in-game

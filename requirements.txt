@@ -3,3 +3,9 @@ uvicorn[standard]
 jinja2
 pyyaml
 python-multipart
+# The app window (eq_log_suite/desktop.py, bin/start-app.sh). Windows uses
+# the built-in Edge WebView2; Linux draws it with Qt WebEngine (~215 MB).
+pywebview
+qtpy; sys_platform == "linux"
+PyQt6; sys_platform == "linux"
+PyQt6-WebEngine; sys_platform == "linux"

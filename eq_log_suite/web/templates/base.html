@@ -5,6 +5,13 @@
   <title>{% block title %}EQ Log Suite{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/table.js" defer></script>
+  <script>
+    // In the app window (eq_log_suite/desktop.py), a page's new tab opens
+    // as another app window instead of in the browser.
+    window.addEventListener("pywebviewready", () => {
+      window.open = (url) => { window.pywebview.api.open_window(String(url)); return null; };
+    });
+  </script>
 </head>
 <body>
   {% if not embed %}
