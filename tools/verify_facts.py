@@ -59,6 +59,19 @@ def main(game="eql"):
         print("   ", d)
     ok &= not differ
 
+    # /npcs as the page renders it: facts version vs the pre-facts version
+    for label, kw in (("no filter", {}), ("search", {"search": "an"}), ("zone", {"zone": "Kedge"})):
+        new, old = app._compute_npc_list_from_facts(game, **kw), app._compute_npc_list(game, **kw)
+        norm = lambda r: {**r, "rare": int(bool(r["rare"])), "vendor": int(bool(r["vendor"])),  # noqa: E731
+                          "kills": int(r["kills"] or 0), "dialogue_lines": int(r["dialogue_lines"] or 0)}
+        same = [norm(r) for r in new] == [norm(r) for r in old]
+        ok &= same
+        print(f"/npcs page ({label}): {len(new)} vs {len(old)} rows, {'identical' if same else 'DIFFER'}")
+        if not same:
+            for x, y in zip(new, old):
+                if norm(x) != norm(y):
+                    print("     facts:", norm(x), "\n     events:", norm(y)); break
+
     # /loot: drops and your kills per npc x zone x item
     kills, drops = defaultdict(int), defaultdict(int)
     for m in mobs:

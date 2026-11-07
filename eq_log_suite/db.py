@@ -104,6 +104,9 @@ def apply_schema(raw_conn, include_indexes: bool = True):
 _ADDED_COLUMNS = [
     ("log_sources", "fingerprint", "TEXT NULL"),
     ("mob_facts", "kills_engaged", "INTEGER NOT NULL DEFAULT 0"),
+    ("mob_facts", "dialogue_lines", "INTEGER NOT NULL DEFAULT 0"),
+    ("mob_facts", "vendor_events", "INTEGER NOT NULL DEFAULT 0"),
+    ("mob_facts", "listed", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

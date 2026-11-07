@@ -2004,7 +2004,62 @@ def _suggest_npc_type(name, rare_or_vendor_stats):
     return "npc"
 
 
+def _compute_npc_list_from_facts(game, search="", zone=""):
+    # NOT LIVE YET (page still uses _compute_npc_list): zone lists differ for
+    # same-second death/zone-change ordering, see tools/verify_facts.py.
+    # From the knowledge base (facts.py): mob_facts rows marked `listed`
+    # (conned / spoke / traded / looted / died -- what this page has always
+    # listed), summed over zones and tiers. Same rows as the pre-facts
+    # version (_compute_npc_list_from_events), checked by tools/verify_facts.py.
+    sql = (
+        "SELECT mf.npc, MIN(mf.level_min) AS level_min, MAX(mf.level_max) AS level_max, "
+        "  MAX(mf.rare) AS rare, (SUM(mf.vendor_events) > 0) AS vendor, "
+        "  SUM(mf.dialogue_lines) AS dialogue_lines, SUM(mf.deaths) AS kills, "
+        "  REPLACE(GROUP_CONCAT(DISTINCT NULLIF(mf.base_zone, '') ORDER BY NULLIF(mf.base_zone, '')), ',', ', ') AS zones "
+        "FROM mob_facts mf JOIN games g ON g.id=mf.game_id WHERE g.code=%s AND mf.listed=1 GROUP BY mf.npc"
+    )
+    params = [game]
+    having_clauses, having_params = [], []
+    if search:
+        having_clauses.append("npc LIKE %s"); having_params.append(f"%{search}%")
+    if zone:
+        having_clauses.append("zones LIKE %s"); having_params.append(f"%{zone}%")
+    if having_clauses:
+        sql += " HAVING " + " AND ".join(having_clauses)
+        params += having_params
+    sql += " ORDER BY npc"
+
+    conn = db.get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            names = [r["npc"] for r in rows]
+            overrides = {}
+            if names:
+                fmt = ",".join(["%s"] * len(names))
+                cur.execute(f"SELECT npc, npc_type, note FROM npc_info WHERE npc IN ({fmt})", names)
+                # Matched case-insensitively -- npc_info.npc was saved via
+                # whatever casing a different query's GROUP BY happened to
+                # pick as that NPC's representative row at the time (e.g.
+                # from /npcs/{game}/detail, a separate query from this
+                # list), which can differ from this query's own pick for
+                # the exact same real NPC.
+                overrides = {r["npc"].lower(): r for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+    for r in rows:
+        override = overrides.get(r["npc"].lower())
+        r["suggested_type"] = _suggest_npc_type(r["npc"], r)
+        r["npc_type"] = (override["npc_type"] if override and override["npc_type"] else r["suggested_type"])
+        r["note"] = override["note"] if override else None
+    return rows
+
+
+
 def _compute_npc_list(game, search="", zone=""):
+    # /npcs, computed from recorded events (still the live version).
     # "Test <level>" sparring dummies (see _is_test_dummy) are excluded --
     # artificial unlimited HP, not real content worth searching/browsing.
     sql = (

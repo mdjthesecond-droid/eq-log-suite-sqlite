@@ -125,7 +125,8 @@ class FactExtractor:
         key = key or ((npc,) + self.zone)
         m = self.mobs.get(key)
         if m is None:
-            m = self.mobs[key] = {"deaths": 0, "kills_by_you": 0, "kills_engaged": 0, "cons": 0, "level_min": None, "level_max": None,
+            m = self.mobs[key] = {"deaths": 0, "kills_by_you": 0, "kills_engaged": 0, "cons": 0,
+                                  "dialogue_lines": 0, "vendor_events": 0, "listed": 0, "level_min": None, "level_max": None,
                                   "rare": 0, "hp": [], "first": ts, "last": ts}
         m["first"] = min(m["first"], ts)
         m["last"] = max(m["last"], ts)
@@ -158,6 +159,7 @@ class FactExtractor:
         if et == "con" and ev.source_type != "you" and ev.source_name and not _is_dummy(ev.source_name):
             m = self._mob(ev.source_name, ts)
             m["cons"] += 1
+            m["listed"] = 1
             if ev.amount is not None:
                 m["level_min"] = ev.amount if m["level_min"] is None else min(m["level_min"], ev.amount)
                 m["level_max"] = ev.amount if m["level_max"] is None else max(m["level_max"], ev.amount)
@@ -170,6 +172,7 @@ class FactExtractor:
             npc = ev.target_name
             m = self._mob(npc, ts)
             m["deaths"] += 1
+            m["listed"] = 1
             if ev.source_type == "you":
                 m["kills_by_you"] += 1
             last = self.engaged.get(npc.lower())
@@ -192,11 +195,17 @@ class FactExtractor:
                 key, death_ts = pending
                 # the zone it died in, even if a delta for it was already flushed
                 self._mob(key[0], death_ts, key=key)["kills_engaged"] += 1
-            self._mob(ev.source_name, ts)
+            self._mob(ev.source_name, ts)["listed"] = 1
             key = (ev.source_name,) + self.zone + (ev.target_name,)
             d = self.loot.setdefault(key, [0, 0])
             d[0] += 1
             d[1] += ev.amount if ev.amount is not None else 1
+            return
+
+        if et in ("npc_dialogue", "vendor_buy", "vendor_sell") and ev.source_name and not _is_dummy(ev.source_name):
+            m = self._mob(ev.source_name, ts)
+            m["listed"] = 1
+            m["dialogue_lines" if et == "npc_dialogue" else "vendor_events"] += 1
             return
 
         if et in DAMAGE_TYPES:
@@ -241,12 +250,14 @@ class FactExtractor:
                 hp = m["hp"]
                 cur.execute(
                     "INSERT INTO mob_facts (game_id, npc, base_zone, tier, solo, deaths, kills_by_you, kills_engaged, "
-                    "cons, level_min, level_max, rare, hp_samples, hp_min, hp_max, first_seen, last_seen) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "cons, dialogue_lines, vendor_events, listed, "
+                    "level_min, level_max, rare, hp_samples, hp_min, hp_max, first_seen, last_seen) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                     "ON CONFLICT (game_id, npc, base_zone, tier, solo) DO UPDATE SET "
                     "deaths = deaths + excluded.deaths, kills_by_you = kills_by_you + excluded.kills_by_you, "
                     "kills_engaged = kills_engaged + excluded.kills_engaged, "
-                    "cons = cons + excluded.cons, "
+                    "cons = cons + excluded.cons, dialogue_lines = dialogue_lines + excluded.dialogue_lines, "
+                    "vendor_events = vendor_events + excluded.vendor_events, listed = MAX(listed, excluded.listed), "
                     "level_min = COALESCE(MIN(level_min, excluded.level_min), level_min, excluded.level_min), "
                     "level_max = COALESCE(MAX(level_max, excluded.level_max), level_max, excluded.level_max), "
                     "rare = MAX(rare, excluded.rare), hp_samples = hp_samples + excluded.hp_samples, "
@@ -254,6 +265,7 @@ class FactExtractor:
                     "hp_max = COALESCE(MAX(hp_max, excluded.hp_max), hp_max, excluded.hp_max), "
                     "first_seen = MIN(first_seen, excluded.first_seen), last_seen = MAX(last_seen, excluded.last_seen)",
                     (self.game_id, npc, base, tier, solo, m["deaths"], m["kills_by_you"], m["kills_engaged"], m["cons"],
+                     m["dialogue_lines"], m["vendor_events"], m["listed"],
                      m["level_min"], m["level_max"], m["rare"], len(hp), min(hp) if hp else None,
                      max(hp) if hp else None, m["first"], m["last"]),
                 )

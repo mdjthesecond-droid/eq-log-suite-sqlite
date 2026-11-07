@@ -210,6 +210,9 @@ CREATE TABLE IF NOT EXISTS mob_facts (
     kills_engaged INTEGER NOT NULL DEFAULT 0, -- you were in the fight (encounter locking: your kill, your
                                               -- loot, whoever landed the blow) -- /loot's drop chance
     cons INTEGER NOT NULL DEFAULT 0,
+    dialogue_lines INTEGER NOT NULL DEFAULT 0, -- it spoke (npc_dialogue)
+    vendor_events INTEGER NOT NULL DEFAULT 0,  -- you bought from / sold to it
+    listed INTEGER NOT NULL DEFAULT 0,         -- conned/spoke/traded/looted/died here: shown on /npcs
     level_min INTEGER NULL,
     level_max INTEGER NULL,
     rare INTEGER NOT NULL DEFAULT 0,          -- a con said so, here
