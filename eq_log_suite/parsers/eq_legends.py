@@ -17,7 +17,7 @@ from eq_log_suite.parsers.base import GameParser, strip_item_article
 MELEE_VERBS_3P = (
     "hits", "crushes", "slashes", "pierces", "cleaves", "bashes", "kicks",
     "punches", "bites", "backstabs", "claws", "stings", "gores", "mauls",
-    "rends", "gouges", "smashes", "strikes",
+    "rends", "gouges", "smashes", "strikes", "smites", "reaves",
 )
 MELEE_VERB_ALT = "|".join(MELEE_VERBS_3P)
 
@@ -29,7 +29,7 @@ MELEE_VERB_ALT = "|".join(MELEE_VERBS_3P)
 MELEE_VERB_3P_TO_BASE = dict(zip(MELEE_VERBS_3P, (
     "hit", "crush", "slash", "pierce", "cleave", "bash", "kick", "punch",
     "bite", "backstab", "claw", "sting", "gore", "maul", "rend", "gouge",
-    "smash", "strike",
+    "smash", "strike", "smite", "reave",
 )))
 
 DODGE_PARRY_ALT = "dodges|parries|blocks|ripostes"
@@ -39,10 +39,13 @@ DODGE_PARRY_ALT = "dodges|parries|blocks|ripostes"
 # first so a compound verb like "frenzy on" is tried before any shorter verb
 # that happens to be a prefix of it.
 INCOMING_ATTACK_VERBS = (
-    "backstab", "bash", "bite", "cleave", "crush", "frenzy on", "hit",
-    "kick", "maul", "pierce", "punch", "slash", "slice", "smash", "strike",
-    "shoot",
+    "backstab", "bash", "bite", "claw", "cleave", "crush", "frenzy on", "gore",
+    "hit", "kick", "maul", "pierce", "punch", "reave", "slash", "slice", "smash",
+    "smite", "sting", "strike", "shoot",
 )
+# claw/gore/reave/smite/sting added 2026-11-07 after a scan of every real log
+# found 25k/22/527/7.6k/13k "tries to <verb>" lines going unparsed (and the
+# "smites"/"reaves" hit lines with them).
 INCOMING_ATTACK_VERB_ALT = "|".join(sorted(INCOMING_ATTACK_VERBS, key=len, reverse=True))
 
 
