@@ -14,7 +14,7 @@ TMP = Path(tempfile.mkdtemp(prefix="eqls-coverage-"))
 os.environ["EQ_LOG_SUITE_CONFIG"] = str(TMP / "config.yaml")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from eq_log_suite import db  # noqa: E402
+from eq_log_suite import db, ingest  # noqa: E402
 from eq_log_suite.importer import import_file  # noqa: E402
 
 FMT = "%a %b %d %H:%M:%S %Y"
@@ -30,20 +30,32 @@ def write(path, lines, mode="w"):
         f.write("".join(lines))
 
 
+# Raw lines aren't stored, so "recorded" = what the importer hands the
+# database to record (insert_batch's lines), captured here per character.
+_RECORDED = []   # (character_id, raw_text)
+_insert_batch = ingest.insert_batch
+
+
+def _capture(conn, game_id, character_id, log_source_id, events_batch, raw_batch, facts=None):
+    _RECORDED.extend((character_id, r[3]) for r in raw_batch)
+    return _insert_batch(conn, game_id, character_id, log_source_id, events_batch, raw_batch, facts=facts)
+
+
+ingest.insert_batch = _capture
+
+
 def recorded(character=None):
-    """Recorded raw lines for a character, as a sorted list of texts."""
-    conn = db.get_connection()
-    try:
-        with conn.cursor() as cur:
-            sql = ("SELECT r.raw_text FROM raw_lines r JOIN log_sources ls ON ls.id=r.log_source_id "
-                   "JOIN characters c ON c.id=ls.character_id")
-            if character:
-                cur.execute(sql + " WHERE c.name=%s", (character,))
-            else:
-                cur.execute(sql)
-            return sorted(r["raw_text"] for r in cur.fetchall())
-    finally:
-        conn.close()
+    """Recorded lines for a character, as a sorted list of texts."""
+    ids = None
+    if character:
+        conn = db.get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM characters WHERE name=%s", (character,))
+                ids = {r["id"] for r in cur.fetchall()}
+        finally:
+            conn.close()
+    return sorted(t for cid, t in _RECORDED if ids is None or cid in ids)
 
 
 def texts(lines):

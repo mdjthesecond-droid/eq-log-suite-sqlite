@@ -281,7 +281,9 @@ def events_browse(
             f"ORDER BY e.ts DESC LIMIT {limit}"
         )
 
-    conn = db.get_connection()
+    # The Live window's events (live_window.py) -- every line of the
+    # selected log, combat included; the permanent database keeps only history.
+    conn = live_window.connection()
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params)
@@ -363,7 +365,7 @@ def _compute_loot(game, npc="", item="", zone=""):
     if zone:
         needle = zone.lower()
         rows = [r for r in rows if needle in (r["zone"] or "").lower()]
-    # NULLs (no kill_count) last; zone/npc break ties (see _compute_loot_from_events)
+    # NULLs (no kill_count) last; zone/npc break ties, so the order is stable
     rows.sort(key=lambda r: (r["item"] or "", r["chance_pct"] is None, -(r["chance_pct"] or 0),
                              (r["zone"] or "").lower(), (r["npc"] or "").lower()))
     truncated = len(rows) > LOOT_RESULT_LIMIT
@@ -373,175 +375,6 @@ def _compute_loot(game, npc="", item="", zone=""):
         r["npc"] = r["npc"] or "(unknown npc)"
         lo, hi = levels.get(r["npc"].lower(), [None, None])
         r["level"] = None if lo is None else (str(lo) if lo == hi else f"{lo}-{hi}")
-    return rows, truncated
-
-
-def _compute_loot_from_events(game, npc="", item="", zone=""):
-    # The pre-facts /loot, computed from every recorded event. Kept only so
-    # tools/verify_facts.py can check _compute_loot against it.
-    # /loot used to render the *entire* zone->npc->item drop table
-    # unconditionally (~0.7s of correlated zone lookups over every loot/
-    # death event, every single page load) now that /zoneinfo covers
-    # per-zone browsing and each NPC's own page covers per-npc browsing.
-    # It now always runs (see the two routes below), capped at
-    # LOOT_RESULT_LIMIT rows -- but that cap is applied only after grouping,
-    # so it doesn't bound the real cost driver: correlating each loot/kill
-    # row to "whichever zone_change happened most recently before it".
-    # That correlation used to be _base_zone_expr(), a SQL correlated
-    # subquery evaluated once per row -- fine at a few thousand rows, but
-    # confirmed real (2026-08-13): with ~8400 loot events + ~3100 kills
-    # after a loot-parser backfill added ~1700 rows, /loot took 86s to
-    # load. Same root cause as [[feedback-correlated-subquery-per-row-not-per-group]]
-    # (MariaDB doesn't materialize/index this well per-row), so it gets the
-    # same fix already used elsewhere in this file (see the con/death
-    # tier-lookup a few hundred lines down): fetch the small zone_change
-    # table once per character and do the "most recent prior row" lookup
-    # in Python with bisect instead of in SQL.
-    #
-    # Future extension point: once items have a curated type (trash/quest/
-    # tradeskill/weapon slot+type/armor slot+type -- not built yet), that'd
-    # join in here (e.g. an `item_info` table keyed on item name, same
-    # shape as npc_info/zone_info) and surface as a filter/column alongside
-    # npc/item/zone.
-    loot_clauses, loot_params = ["ev.event_type='loot'", "g.code = %s"], [game]
-    if npc:
-        loot_clauses.append("ev.source_name LIKE %s"); loot_params.append(f"%{npc}%")
-    if item:
-        loot_clauses.append("ev.target_name LIKE %s"); loot_params.append(f"%{item}%")
-
-    conn = db.get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT ev.character_id, ev.ts, ev.source_name AS npc, "
-                "ev.target_name AS item, ev.amount AS qty "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                f"WHERE {' AND '.join(loot_clauses)}",
-                loot_params,
-            )
-            loot_rows = cur.fetchall()
-
-            # Drop chance needs kills as the denominator -- not every kill
-            # drops anything, so "how often does X drop" only means
-            # something relative to "how many times did I kill it". Not
-            # narrowed to loot_rows' npcs here (that filtering happened in
-            # SQL before, as a cheap `IN`) -- with only ~3000 rows total,
-            # fetching all of them and letting the dict lookups below
-            # simply go unused for npcs with no loot match is simpler and
-            # not meaningfully slower.
-            cur.execute(
-                "SELECT ev.character_id, ev.ts, ev.target_name AS npc "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                "WHERE ev.event_type='death' AND ev.source_type='you' AND g.code=%s",
-                (game,),
-            )
-            kill_rows = cur.fetchall()
-
-            cur.execute(
-                "SELECT ev.character_id, ev.ts, "
-                "JSON_UNQUOTE(JSON_EXTRACT(ev.extra,'$.base_zone')) AS zone "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                "WHERE ev.event_type='zone_change' AND g.code=%s ORDER BY ev.character_id, ev.ts",
-                (game,),
-            )
-            zone_changes = cur.fetchall()
-    finally:
-        conn.close()
-
-    # Same "most recent zone_change at or before ts, per character" lookup
-    # as _base_zone_expr, done once here instead of as a correlated SQL
-    # subquery -- see the comment above for why.
-    zc_by_char: dict = {}
-    for r in zone_changes:
-        zc = zc_by_char.setdefault(r["character_id"], {"ts": [], "zone": []})
-        zc["ts"].append(r["ts"])
-        zc["zone"].append(r["zone"])
-
-    def zone_at(character_id, ts):
-        zc = zc_by_char.get(character_id)
-        if not zc:
-            return None
-        i = bisect.bisect_right(zc["ts"], ts) - 1
-        return zc["zone"][i] if i >= 0 else None
-
-    for r in loot_rows:
-        r["zone"] = zone_at(r["character_id"], r["ts"])
-    for r in kill_rows:
-        r["zone"] = zone_at(r["character_id"], r["ts"])
-
-    loot_grouped: dict = {}
-    for r in loot_rows:
-        key = (r["npc"], r["zone"], r["item"])
-        g = loot_grouped.setdefault(key, {"qtys": [], "drops": 0})
-        g["qtys"].append(r["qty"] if r["qty"] is not None else 1)
-        g["drops"] += 1
-
-    kill_counts: dict = {}
-    for r in kill_rows:
-        key = (r["npc"], r["zone"])
-        kill_counts[key] = kill_counts.get(key, 0) + 1
-
-    rows = []
-    for (npc_, zone_, item_), g in loot_grouped.items():
-        kill_count = kill_counts.get((npc_, zone_))
-        rows.append({
-            "zone": zone_, "npc": npc_, "item": item_,
-            "avg_qty": round(sum(g["qtys"]) / len(g["qtys"]), 1),
-            "drops": g["drops"],
-            "kill_count": kill_count,
-            "chance_pct": round(g["drops"] / kill_count * 100, 2) if kill_count else None,
-        })
-
-    if zone:
-        needle = zone.lower()
-        rows = [r for r in rows if needle in (r["zone"] or "").lower()]
-
-    # NULLs (no kill_count) sort last, same as MariaDB's DESC-puts-NULL-last
-    # behavior in the SQL version this replaced.
-    # zone/npc break ties, so equal-chance rows (and which of them survive
-    # the LOOT_RESULT_LIMIT cut) don't depend on the database's row order.
-    rows.sort(key=lambda r: (r["item"] or "", r["chance_pct"] is None, -(r["chance_pct"] or 0),
-                             (r["zone"] or "").lower(), (r["npc"] or "").lower()))
-    truncated = len(rows) > LOOT_RESULT_LIMIT
-    rows = rows[:LOOT_RESULT_LIMIT]
-
-    conn = db.get_connection()
-    try:
-        with conn.cursor() as cur:
-            # Level (from /con) as appropriate, per npc -- same source as
-            # each NPC's own page, just fetched once here rather than
-            # correlated per loot row. Matched case-insensitively: classic
-            # EQ's own text casing for the same mob name varies by message
-            # template (con lines are sentence-initial, "A dry bone
-            # skeleton"; loot/death lines are mid-sentence, "a dry bone
-            # skeleton") -- confirmed real, not a parsing bug, so the join
-            # has to tolerate it or the level would silently never show.
-            levels_by_npc = {}
-            if rows:
-                cur.execute(
-                    "SELECT ev.source_name AS npc, MIN(ev.amount) AS level_min, MAX(ev.amount) AS level_max "
-                    "FROM events ev JOIN games g ON ev.game_id=g.id "
-                    "WHERE ev.event_type='con' AND g.code=%s GROUP BY ev.source_name",
-                    (game,),
-                )
-                levels_by_npc = {r["npc"].lower(): r for r in cur.fetchall()}
-    finally:
-        conn.close()
-
-    # groupby() in the template re-sorts by item then zone -- None (a
-    # kill/drop before any zone_change was ever logged) can't be ordered
-    # against itself, so normalize to a sortable placeholder here rather
-    # than at render time.
-    for r in rows:
-        r["zone"] = r["zone"] or "(unknown zone)"
-        r["npc"] = r["npc"] or "(unknown npc)"
-        lvl = levels_by_npc.get(r["npc"].lower())
-        r["level"] = None
-        if lvl and lvl["level_min"] is not None:
-            r["level"] = (
-                str(lvl["level_min"]) if lvl["level_min"] == lvl["level_max"]
-                else f'{lvl["level_min"]}-{lvl["level_max"]}'
-            )
     return rows, truncated
 
 
@@ -569,7 +402,6 @@ def loot_report_eq(request: Request, npc: str = "", item: str = "", zone: str = 
         "unresolved_zone_starts": _unresolved_zone_starts("eq"),
         "filters": {"npc": npc, "item": item, "zone": zone},
     })
-
 
 
 def _compute_quests(game, character="", quest="", zone="", npc=""):
@@ -1089,95 +921,37 @@ def tasks_report_eq(request: Request, character: str = "", task: str = "", npc: 
 
 
 def _compute_zones(game, character="", zone="", start_ts="", end_ts=""):
-    # This is the expensive one: the LEFT JOIN below re-scans events across
-    # every zone-visit session's full time window to compute combat stats --
-    # fine for a handful of sessions, slow across a character's entire
-    # history (this is what was taking a while to load with no filters at
-    # all). So, same as /loot and /npcs, this only ever runs against
-    # whatever character/zone/date-range the user actually asks for -- see
-    # the routes below, which don't call this at all with no filters given.
-    char_clauses, char_params = ["g.code = %s"], [game]
+    # Each zone visit's summary (zone_visits, written as lines are recorded
+    # -- facts.py): when you left, your damage/swings/hits/crits and
+    # first/last fight there. Kills come from the kill lines kept as history.
+    # A visit with no left_at is the character's latest: if the log simply
+    # ended (logout, crash), its last line there stands in for when you left.
+    clauses, params = ["g.code = %s"], [game]
     if character:
-        char_clauses.append("c.name = %s"); char_params.append(character)
-    char_where = f"AND {' AND '.join(char_clauses)}"
-
-    # zone/date filters narrow which *resulting sessions* get shown, not
-    # which raw zone_change rows compute the LEAD() boundary above -- doing
-    # it the other way (filtering the zone_change events themselves to just
-    # the searched zone/date) would silently corrupt left_at/duration for
-    # every session that isn't the character's very last one, by skipping
-    # over the real intervening zone changes the LEAD() needs to see.
-    outer_clauses, outer_params = [], []
+        clauses.append("c.name = %s"); params.append(character)
     if zone:
-        outer_clauses.append("zs.zone LIKE %s"); outer_params.append(f"%{zone}%")
+        clauses.append("zv.zone_name LIKE %s"); params.append(f"%{zone}%")
     if start_ts:
-        outer_clauses.append("zs.entered_at >= %s"); outer_params.append(start_ts)
+        clauses.append("zv.ts >= %s"); params.append(start_ts)
     if end_ts:
-        outer_clauses.append("zs.entered_at <= %s"); outer_params.append(end_ts)
-    outer_where = f"AND {' AND '.join(outer_clauses)}" if outer_clauses else ""
-
-    # Zone "sessions" are the gap between one zone_change and the character's
-    # next one; combat stats for that session are whatever damage/kill/melee
-    # events from you fall inside that time window. A NULL left_at means no
-    # further zone_change was ever recorded (see the logout/file-close
-    # fallback below).
-    sql = (
-        "WITH zone_sessions AS ("
-        "  SELECT e.character_id, e.target_name AS zone, e.ts AS entered_at, "
-        "         LEAD(e.ts) OVER (PARTITION BY e.character_id ORDER BY e.ts) AS left_at "
-        "  FROM events e JOIN games g ON e.game_id=g.id JOIN characters c ON e.character_id=c.id "
-        f"  WHERE e.event_type = 'zone_change' {char_where}"
-        ") "
-        "SELECT zs.character_id, c.name AS character_name, g.code AS game, zs.zone, zs.entered_at, zs.left_at, "
-        "  MIN(CASE WHEN e.event_type IN ('melee','spell_damage','ability_damage') AND e.source_type='you' THEN e.ts END) AS first_fight_at, "
-        "  MAX(CASE WHEN e.event_type IN ('melee','spell_damage','ability_damage') AND e.source_type='you' THEN e.ts END) AS last_fight_at, "
-        "  SUM(CASE WHEN e.event_type IN ('melee','spell_damage','ability_damage') AND e.source_type='you' THEN e.amount ELSE 0 END) AS total_damage, "
-        # not just kills you personally landed -- group/raid content means
-        # someone else often gets the credit, but the mob still died on your watch
-        "  SUM(CASE WHEN e.event_type='death' AND e.target_type != 'you' THEN 1 ELSE 0 END) AS kills, "
-        "  SUM(CASE WHEN e.event_type='melee' AND e.source_type='you' THEN 1 ELSE 0 END) AS swings, "
-        "  SUM(CASE WHEN e.event_type='melee' AND e.source_type='you' AND e.outcome IN ('hit','crit') THEN 1 ELSE 0 END) AS landed, "
-        "  SUM(CASE WHEN e.event_type='melee' AND e.source_type='you' AND e.outcome='crit' THEN 1 ELSE 0 END) AS crits "
-        "FROM zone_sessions zs "
-        "JOIN characters c ON c.id = zs.character_id "
-        "JOIN games g ON g.id = c.game_id "
-        "LEFT JOIN events e ON e.character_id = zs.character_id AND e.ts >= zs.entered_at "
-        "  AND (zs.left_at IS NULL OR e.ts < zs.left_at) "
-        f"WHERE 1=1 {outer_where} "
-        "GROUP BY zs.character_id, zs.zone, zs.entered_at, zs.left_at "
-        "ORDER BY zs.entered_at DESC"
-    )
+        clauses.append("zv.ts <= %s"); params.append(end_ts)
 
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(sql, char_params + outer_params)
+            cur.execute(
+                "SELECT zv.character_id, c.name AS character_name, g.code AS game, zv.zone_name AS zone, "
+                "  zv.ts AS entered_at, zv.left_at, zv.last_line_at, zv.first_fight_at, zv.last_fight_at, "
+                "  zv.total_damage, zv.swings, zv.landed, zv.crits "
+                "FROM zone_visits zv JOIN characters c ON c.id=zv.character_id JOIN games g ON g.id=c.game_id "
+                f"WHERE {' AND '.join(clauses)} ORDER BY zv.ts DESC",
+                params,
+            )
             rows = cur.fetchall()
 
-            # A NULL left_at doesn't necessarily mean "still in that zone" --
-            # it could just as well be the log ending (logout, crash, /log
-            # off) with no further zone_change ever recorded. There's no
-            # explicit logout line to key off of, so the character's last
-            # recorded event of any kind is the best available stand-in for
-            # "when the log stopped" -- only fetched for characters that
-            # actually have an open (NULL left_at) session, not everyone.
-            char_ids = {r["character_id"] for r in rows if r["left_at"] is None}
-            last_activity = {}
-            if char_ids:
-                fmt = ",".join(["%s"] * len(char_ids))
-                cur.execute(
-                    f"SELECT character_id, MAX(ts) AS last_ts FROM events WHERE character_id IN ({fmt}) GROUP BY character_id",
-                    list(char_ids),
-                )
-                last_activity = {r["character_id"]: r["last_ts"] for r in cur.fetchall()}
-
-            # Per-NPC-name kill counts for each session, to validate how many
-            # of each mob were actually involved (e.g. after merging "A
-            # jeering gargoyle"/"a jeering gargoyle" into one name) rather
-            # than just the single combined `kills` total above. Bulk-fetched
-            # and bucketed in Python via bisect -- same reasoning as
-            # _compute_npc_combat_tiers's docstring: a correlated per-session
-            # subquery here would be the same slow anti-pattern.
+            # Not just kills you personally landed -- group/raid content means
+            # someone else often gets the credit, but the mob still died on
+            # your watch. Per-name counts too, bucketed per visit via bisect.
             all_char_ids = sorted({r["character_id"] for r in rows})
             deaths_by_char = {}
             if all_char_ids:
@@ -1196,14 +970,22 @@ def _compute_zones(game, character="", zone="", start_ts="", end_ts=""):
         conn.close()
 
     for r in rows:
+        d = deaths_by_char.get(r["character_id"], {"ts": [], "name": []})
+        lo = bisect.bisect_left(d["ts"], r["entered_at"])
+        r["kills"] = (bisect.bisect_left(d["ts"], r["left_at"]) if r["left_at"] else len(d["ts"])) - lo
+        hi = bisect.bisect_right(d["ts"], r["left_at"]) if r["left_at"] else len(d["ts"])
+        counts = {}
+        for name in d["name"][lo:hi]:
+            counts[name] = counts.get(name, 0) + 1
+        r["npc_kills"] = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+
         total_damage = float(r["total_damage"] or 0)
         r["total_damage"] = total_damage
         r["left_at_estimated"] = False
-        if r["left_at"] is None:
-            fallback = last_activity.get(r["character_id"])
-            if fallback and fallback > r["entered_at"]:
-                r["left_at"] = fallback
-                r["left_at_estimated"] = True
+        last_line = r.pop("last_line_at")
+        if r["left_at"] is None and last_line and last_line > r["entered_at"]:
+            r["left_at"] = last_line
+            r["left_at_estimated"] = True
         if r["entered_at"] and r["left_at"]:
             r["duration_min"] = round((r["left_at"] - r["entered_at"]).total_seconds() / 60, 1)
         else:
@@ -1215,14 +997,6 @@ def _compute_zones(game, character="", zone="", start_ts="", end_ts=""):
             r["dps"] = None
         r["hit_pct"] = round(r["landed"] / r["swings"] * 100, 1) if r["swings"] else None
         r["crit_pct"] = round(r["crits"] / r["landed"] * 100, 1) if r["landed"] else None
-
-        d = deaths_by_char.get(r["character_id"], {"ts": [], "name": []})
-        lo = bisect.bisect_left(d["ts"], r["entered_at"])
-        hi = bisect.bisect_right(d["ts"], r["left_at"]) if r["left_at"] else len(d["ts"])
-        counts = {}
-        for name in d["name"][lo:hi]:
-            counts[name] = counts.get(name, 0) + 1
-        r["npc_kills"] = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
 
     return rows
 
@@ -1249,11 +1023,10 @@ def zones_report_eq(request: Request, character: str = "", zone: str = "", start
     })
 
 
-GATE_SPELLS = ("Gate", "Origin")
-GATE_EXCLUSION_WINDOW_S = 60  # see plan notes: real gate/origin casts land the
-# resulting zone_change 9-41s later in the actual log; anything beyond that
-# observed in the data is clearly an unrelated later zone change, not caused
-# by that cast.
+# Real gate/origin casts land the resulting zone_change 9-41s later in the
+# actual log; anything beyond the window is an unrelated later zone change.
+# Defined with the knowledge base, which notes casts on each zone change.
+from eq_log_suite.facts import GATE_EXCLUSION_WINDOW_S, GATE_SPELLS  # noqa: E402
 
 # Classic EQ's "Plane of Knowledge Book" -- a static, no-cast zone item found
 # in nearly every zone that teleports directly to/from PoK. Only confirmed
@@ -1396,11 +1169,8 @@ def _compute_zone_list(game):
     # level range = the cons of mobs fought somewhere (mob_facts.fought --
     # quest-givers/vendors are often far above what you fight there), npcs
     # seen = conned or spoke here, rare mobs = a con here said rare. Zones =
-    # every zone you've entered (zone_visits). Same rows as the pre-facts
-    # version (_compute_zone_list_from_events), checked by
-    # tools/verify_facts.py -- except where a line and a zone change share a
-    # second (facts follow line order), and names that differ only in
-    # capitalization now count once in "npcs seen" (they did for rares).
+    # every zone you've entered (zone_visits). Names that differ only in
+    # capitalization count once.
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
@@ -1445,149 +1215,6 @@ def _compute_zone_list(game):
             "level_max": level_max,
             "npc_count": st.get("npc_count") or 0,
             "rare_count": st.get("rare_count") or 0,
-            "note": override["note"] if override else None,
-        })
-    return rows
-
-
-def _compute_zone_list_from_events(game):
-    # The pre-facts /zoneinfo. Kept only for tools/verify_facts.py.
-    # base_zone is resolved via a single bulk zone_change fetch + Python
-    # bisect (per character), not a correlated SQL subquery per row
-    # (_base_zone_expr()) -- confirmed real (2026-08-24): with ~2.7M eql
-    # events, the _base_zone_expr() version of this function took ~48s
-    # (37s of that in the npc_by_zone query alone, measured via
-    # SHOW PROCESSLIST). Same root cause and fix as
-    # [[feedback-correlated-subquery-per-row-not-per-group]], already
-    # applied to /loot -- see that function's comment for the pattern this
-    # mirrors.
-    conn = db.get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT ev.character_id, ev.ts, "
-                "JSON_UNQUOTE(JSON_EXTRACT(ev.extra,'$.base_zone')) AS zone "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                "WHERE ev.event_type='zone_change' AND g.code=%s ORDER BY ev.character_id, ev.ts",
-                (game,),
-            )
-            zone_changes = cur.fetchall()
-
-            cur.execute(
-                "SELECT ev.character_id, ev.ts, ev.source_name AS npc, ev.amount AS level, "
-                # ='true', not the bare keyword: JSON_EXTRACT becomes `->`
-                # (JSON text -- see sqlite_compat.py), and 'true'=true is 0.
-                "  JSON_EXTRACT(ev.extra,'$.rare')='true' AS rare "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                "WHERE ev.event_type='con' AND g.code=%s",
-                (game,),
-            )
-            con_rows_raw = cur.fetchall()
-
-            # Level range is restricted to NPCs actually fought (not just
-            # /con'd) -- a zone's quest-giver/vendor/lore NPCs are often
-            # much higher level than anything you'd actually fight there,
-            # and including them skews the range upward into something
-            # misleading. "Fought" = appeared as either side of a combat
-            # event; rare_count below deliberately stays unrestricted (a
-            # rare you've conned but not yet fought is still worth knowing
-            # about).
-            cur.execute(
-                "SELECT DISTINCT name FROM ("
-                "  SELECT e.source_name AS name FROM events e JOIN games g ON e.game_id=g.id "
-                "    WHERE g.code=%s AND e.event_type IN "
-                "      ('melee','spell_damage','spell_effect','spell_resist','death') "
-                "  UNION "
-                "  SELECT e.target_name AS name FROM events e JOIN games g ON e.game_id=g.id "
-                "    WHERE g.code=%s AND e.event_type IN "
-                "      ('melee','spell_damage','spell_effect','spell_resist','death')"
-                ") t WHERE name IS NOT NULL",
-                (game, game),
-            )
-            # Matched case-insensitively: the same mob's name can show up
-            # both capitalized ("Orc centurion") and lowercase ("orc
-            # centurion") depending on whether the client happened to
-            # capitalize it as the first word of a sentence -- same root
-            # cause as the leading-article "A"/"An" normalization in
-            # normalize_actor_name(), just without an article to anchor on,
-            # so it isn't caught there. Confirmed real in an eq log
-            # (Emperor Crush's "Orc centurion" appears both ways). rare_names
-            # is folded the same way so the same rare mob doesn't inflate
-            # rare_count by counting as two.
-            fought_names = {r["name"].lower() for r in cur.fetchall() if r["name"]}
-
-            cur.execute(
-                "SELECT ev.character_id, ev.ts, ev.source_name "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                "WHERE ev.event_type IN ('con','npc_dialogue') AND g.code=%s",
-                (game,),
-            )
-            npc_rows_raw = cur.fetchall()
-
-            cur.execute("SELECT zone, level_min_override, level_max_override, note FROM zone_info")
-            overrides = {r["zone"]: r for r in cur.fetchall()}
-    finally:
-        conn.close()
-
-    # Same "most recent zone_change at or before ts, per character" lookup
-    # as _base_zone_expr, done once here instead of as a correlated SQL
-    # subquery -- see this function's comment above for why.
-    zc_by_char: dict = {}
-    for r in zone_changes:
-        zc = zc_by_char.setdefault(r["character_id"], {"ts": [], "zone": []})
-        zc["ts"].append(r["ts"])
-        zc["zone"].append(r["zone"])
-
-    def zone_at(character_id, ts):
-        zc = zc_by_char.get(character_id)
-        if not zc:
-            return None
-        i = bisect.bisect_right(zc["ts"], ts) - 1
-        return zc["zone"][i] if i >= 0 else None
-
-    zones = sorted({z for z in (r["zone"] for r in zone_changes) if z})
-
-    con_by_zone = {}
-    for r in con_rows_raw:
-        if _is_test_dummy(r["npc"]):
-            continue
-        zone = zone_at(r["character_id"], r["ts"])
-        if not zone:
-            continue
-        entry = con_by_zone.setdefault(zone, {"levels": [], "rare_names": set()})
-        if r["rare"]:
-            entry["rare_names"].add(r["npc"].lower())
-        if r["npc"].lower() in fought_names:
-            entry["levels"].append(r["level"])
-
-    zone_npc_sets: dict = {}
-    for r in npc_rows_raw:
-        if _is_test_dummy(r["source_name"]):
-            continue
-        zone = zone_at(r["character_id"], r["ts"])
-        if not zone:
-            continue
-        zone_npc_sets.setdefault(zone, set()).add(r["source_name"])
-    npc_by_zone = {zone: len(names) for zone, names in zone_npc_sets.items()}
-
-    rows = []
-    for zone in zones:
-        con_stats = con_by_zone.get(zone, {"levels": [], "rare_names": set()})
-        override = overrides.get(zone)
-        levels = con_stats["levels"]
-        level_min = min(levels) if levels else None
-        level_max = max(levels) if levels else None
-        if override:
-            if override["level_min_override"] is not None:
-                level_min = override["level_min_override"]
-            if override["level_max_override"] is not None:
-                level_max = override["level_max_override"]
-        rows.append({
-            "zone": zone,
-            "level_min": level_min,
-            "level_max": level_max,
-            "npc_count": npc_by_zone.get(zone, 0),
-            "rare_count": len(con_stats["rare_names"]),
             "note": override["note"] if override else None,
         })
     return rows
@@ -1683,11 +1310,15 @@ def _zone_transitions(game):
                 "WITH zone_seq AS ("
                 "  SELECT e.character_id, e.ts, "
                 "    JSON_UNQUOTE(JSON_EXTRACT(e.extra,'$.base_zone')) AS zone, "
-                "    LAG(JSON_UNQUOTE(JSON_EXTRACT(e.extra,'$.base_zone'))) OVER (PARTITION BY e.character_id ORDER BY e.ts) AS prev_zone "
+                "    LAG(JSON_UNQUOTE(JSON_EXTRACT(e.extra,'$.base_zone'))) OVER (PARTITION BY e.character_id ORDER BY e.ts) AS prev_zone, "
+                # How soon after your last cast / Gate it came (facts.py notes
+                # it on the zone change, since casts aren't stored).
+                "    JSON_EXTRACT(e.extra,'$.cast_s_before') AS cast_s_before, "
+                "    JSON_EXTRACT(e.extra,'$.gate_s_before') AS gate_s_before "
                 "  FROM events e JOIN games g ON e.game_id=g.id "
                 "  WHERE e.event_type='zone_change' AND g.code=%s"
                 ") "
-                "SELECT character_id, ts, zone, prev_zone FROM zone_seq "
+                "SELECT character_id, ts, zone, prev_zone, cast_s_before, gate_s_before FROM zone_seq "
                 "WHERE prev_zone IS NOT NULL AND prev_zone <> zone",
                 (game,),
             )
@@ -1702,7 +1333,8 @@ def _pok_book_routes(game):
     and this character cast no spell at all in the GATE_EXCLUSION_WINDOW_S
     before it (a real Gate/Origin/translocator trip would show a cast or a
     translocator hail -- see _compute_zone_connections -- so absence of any
-    cast is what's left to mean "clicked a book"). Empty for any game not in
+    cast is what's left to mean "clicked a book"; noted on the zone change as
+    cast_s_before when it's recorded -- facts.py). Empty for any game not in
     POK_ZONE_BY_GAME."""
     pok_zone = POK_ZONE_BY_GAME.get(game)
     if not pok_zone:
@@ -1715,30 +1347,9 @@ def _pok_book_routes(game):
     if not transitions:
         return []
 
-    conn = db.get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT ev.character_id, ev.ts FROM events ev JOIN games g ON ev.game_id=g.id "
-                "WHERE ev.event_type='spell_cast' AND ev.source_type='you' AND g.code=%s",
-                (game,),
-            )
-            casts = cur.fetchall()
-    finally:
-        conn.close()
-
-    casts_by_char = {}
-    for c in casts:
-        casts_by_char.setdefault(c["character_id"], []).append(c["ts"])
-
     routes = []
     for tr in transitions:
-        char_casts = casts_by_char.get(tr["character_id"], [])
-        cast_nearby = any(
-            0 <= (tr["ts"] - cast_ts).total_seconds() <= GATE_EXCLUSION_WINDOW_S
-            for cast_ts in char_casts
-        )
-        if cast_nearby:
+        if tr["cast_s_before"] is not None:   # you cast within GATE_EXCLUSION_WINDOW_S before it
             continue
         routes.append({
             "character_id": tr["character_id"], "ts": tr["ts"],
@@ -1769,32 +1380,11 @@ def _compute_zone_connections(game):
     Both zones are base zones (tiered instance variants collapse together,
     same as _compute_zone_list).
 
-    The gate-exclusion check used to be a correlated `NOT EXISTS` subquery in
-    SQL -- correct, but ~100x slower than this in practice: MariaDB doesn't
-    materialize the small Gate/Origin-cast CTE it's checked against, so it
-    re-scans the *whole* events table's spell_cast rows once per zone
-    transition (measured 5.67s here vs 0.06s below). Both the transition
-    list and the cast list are tiny (hundreds of rows, not hundreds of
-    thousands), so doing the exclusion check as a plain Python loop over
-    two already-fetched lists is both correct and dramatically faster.
+    Whether a Gate/Origin came just before is noted on the zone change
+    itself when it's recorded (gate_s_before -- facts.py), since your casts
+    aren't stored.
     """
     transitions = _zone_transitions(game)
-
-    conn = db.get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT ev.character_id, ev.ts FROM events ev JOIN games g ON ev.game_id=g.id "
-                "WHERE ev.event_type='spell_cast' AND ev.source_type='you' AND ev.verb IN (%s,%s) AND g.code=%s",
-                GATE_SPELLS + (game,),
-            )
-            gate_casts = cur.fetchall()
-    finally:
-        conn.close()
-
-    gate_by_char = {}
-    for gc in gate_casts:
-        gate_by_char.setdefault(gc["character_id"], []).append(gc["ts"])
 
     translocated_zone_ts = {(r["character_id"], r["zone_ts"]) for r in _translocator_routes(game)}
     book_zone_ts = {(r["character_id"], r["ts"]) for r in _pok_book_routes(game)}
@@ -1805,12 +1395,7 @@ def _compute_zone_connections(game):
             continue
         if (tr["character_id"], tr["ts"]) in book_zone_ts:
             continue
-        char_casts = gate_by_char.get(tr["character_id"], [])
-        gated = any(
-            0 <= (tr["ts"] - cast_ts).total_seconds() <= GATE_EXCLUSION_WINDOW_S
-            for cast_ts in char_casts
-        )
-        if gated:
+        if tr["gate_s_before"] is not None:   # a Gate/Origin within GATE_EXCLUSION_WINDOW_S before it
             continue
         key = (tr["prev_zone"], tr["zone"])
         entry = pairs.setdefault(key, {"from_zone": key[0], "to_zone": key[1], "times": 0, "last_seen": tr["ts"]})
@@ -1822,8 +1407,8 @@ def _compute_zone_connections(game):
 
 def _zone_quest_history(cur, game, match_where, match_params):
     """(quest_items, completed_trades) for a zone's _zone_window_where
-    fragment -- timestamped history, not counts, so it stays on recorded
-    events (like /quests) rather than the knowledge base."""
+    fragment -- timestamped history, not counts, so from the kept history
+    lines (like /quests) rather than the knowledge base."""
     # quest/reward items (non-currency reward text) given by NPCs here
     cur.execute(
         "SELECT ev.source_name AS npc, "
@@ -1902,12 +1487,8 @@ def _compute_zone_detail(game, zone, tier="all", solo="any"):
     # From the knowledge base (facts.py): NPCs, loot and ground spawns are
     # summed from the zone's mob_facts/loot_facts/ground_spawn_facts rows for
     # the chosen tier/solo variant; the tier toggle comes from zone_visits.
-    # Quest rewards and completed turn-ins are timestamped history, so they
-    # still come from recorded events (_zone_quest_history). Same page as the
-    # pre-facts version (_compute_zone_detail_from_events), checked by
-    # tools/verify_facts.py -- except where a line and a zone change share a
-    # second: facts follow the log's line order, the event version matched
-    # by timestamp alone.
+    # Quest rewards and completed turn-ins are timestamped history, from the
+    # kept history lines (_zone_quest_history).
     where, params = ["g.code=%s", "f.base_zone=%s"], [game, zone]
     if tier != "all":
         where.append("f.tier=%s"); params.append(int(tier))
@@ -1970,117 +1551,6 @@ def _compute_zone_detail(game, zone, tier="all", solo="any"):
                 (zone,),
             )
             override = cur.fetchone()
-    finally:
-        conn.close()
-
-    return {
-        "variants": variants,
-        "npcs": npcs,
-        "loot": loot,
-        "ground_spawns": ground_spawns,
-        "quest_items": quest_items,
-        "completed_trades": completed_trades,
-        "rares": rares,
-        "override": override,
-    }
-
-
-def _compute_zone_detail_from_events(game, zone, tier="all", solo="any"):
-    # The pre-facts zone detail. Kept only for tools/verify_facts.py.
-    match_where, match_params = _zone_window_where(game, zone, tier, solo)
-
-    conn = db.get_connection()
-    try:
-        with conn.cursor() as cur:
-            # tiers/solo actually observed for this zone, to build the toggle UI.
-            # These are read directly off each zone_change's own extra (no
-            # correlation needed -- unlike tier_expr/solo_expr above, which
-            # look up the most recent zone_change *before* some other event).
-            cur.execute(
-                "SELECT DISTINCT JSON_EXTRACT(e.extra,'$.tier') AS tier, "
-                "JSON_UNQUOTE(JSON_EXTRACT(e.extra,'$.tier_label')) AS tier_label, "
-                "JSON_EXTRACT(e.extra,'$.solo') AS solo "
-                "FROM events e JOIN games g ON e.game_id=g.id "
-                "WHERE e.event_type='zone_change' AND g.code=%s "
-                "AND JSON_UNQUOTE(JSON_EXTRACT(e.extra,'$.base_zone')) = %s",
-                (game, zone),
-            )
-            # SELECT DISTINCT has no inherent order (MariaDB returned e.g.
-            # Nagafen's Lair as 2,1,0,4), so the tier toggle shuffled between
-            # runs -- sort by tier number, then group before solo.
-            variants = sorted(
-                cur.fetchall(),
-                key=lambda v: (int(v["tier"]) if str(v["tier"] or "").isdigit() else -1, str(v["solo"])),
-            )
-
-            # NPCs seen: con (with level/rare) and npc_dialogue key off
-            # source_name (who's conning/talking); death keys off
-            # target_name (who died -- source_name for a death event is
-            # the killer, e.g. "You", not the NPC roster we want here).
-            # "Test <level>" sparring dummies (see _is_test_dummy) are
-            # excluded -- artificial unlimited HP, not real zone content.
-            cur.execute(
-                "WITH zone_npc_events AS ("
-                "  SELECT ev.source_name AS npc, ev.event_type, ev.amount, ev.extra "
-                "  FROM events ev JOIN games g ON ev.game_id=g.id "
-                "  WHERE ev.event_type IN ('con','npc_dialogue') AND ev.source_name IS NOT NULL "
-                "    AND ev.source_name NOT LIKE 'Test %%' "
-                f"    AND g.code=%s AND {match_where} "
-                "  UNION ALL "
-                "  SELECT ev.target_name AS npc, ev.event_type, ev.amount, ev.extra "
-                "  FROM events ev JOIN games g ON ev.game_id=g.id "
-                "  WHERE ev.event_type='death' AND ev.target_type != 'you' AND ev.target_name IS NOT NULL "
-                "    AND ev.target_name NOT LIKE 'Test %%' "
-                f"    AND g.code=%s AND {match_where}"
-                ") "
-                "SELECT npc, "
-                "MAX(CASE WHEN event_type='con' THEN amount END) AS level, "
-                # MAX() strips JSON_EXTRACT's JSON-typed result down to a
-                # plain string ("true"/"false"), so it must be compared
-                # against the string 'true' here, not the bare keyword true
-                # (which MariaDB happily accepts directly against a raw
-                # JSON_EXTRACT() call, but silently mis-compares as 0 once
-                # MAX() has touched it -- verified against real data).
-                "MAX(CASE WHEN event_type='con' THEN JSON_EXTRACT(extra,'$.rare') END)='true' AS rare, "
-                "SUM(CASE WHEN event_type='death' THEN 1 ELSE 0 END) AS kills, "
-                "SUM(CASE WHEN event_type='npc_dialogue' THEN 1 ELSE 0 END) AS dialogue_lines "
-                "FROM zone_npc_events GROUP BY npc ORDER BY npc",
-                [game] + match_params + [game] + match_params,
-            )
-            npcs = cur.fetchall()
-
-            # loot obtained in this zone (same shape as _compute_loot, scoped to zone)
-            cur.execute(
-                "SELECT ev.source_name AS npc, ev.target_name AS item, "
-                "ROUND(AVG(ev.amount), 1) AS avg_qty, COUNT(*) AS drops "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                f"WHERE ev.event_type='loot' AND g.code=%s AND {match_where} "
-                "GROUP BY ev.source_name, ev.target_name ORDER BY npc, item",
-                [game] + match_params,
-            )
-            loot = cur.fetchall()
-
-            # ground spawns picked up here -- no source NPC (unlike loot
-            # above), just an item and how many times it's been picked up.
-            cur.execute(
-                "SELECT ev.target_name AS item, COUNT(*) AS times "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                f"WHERE ev.event_type='ground_spawn' AND g.code=%s AND {match_where} "
-                "GROUP BY ev.target_name ORDER BY item",
-                [game] + match_params,
-            )
-            ground_spawns = cur.fetchall()
-
-            quest_items, completed_trades = _zone_quest_history(cur, game, match_where, match_params)
-
-            rares = _zone_rares(npcs, loot)
-
-            cur.execute(
-                "SELECT level_min_override, level_max_override, note FROM zone_info WHERE zone=%s",
-                (zone,),
-            )
-            override = cur.fetchone()
-
     finally:
         conn.close()
 
@@ -2168,13 +1638,10 @@ def _suggest_npc_type(name, rare_or_vendor_stats):
 
 
 def _compute_npc_list(game, search="", zone=""):
-    # Differs from the event version only where a death and a zone change
-    # share a second: facts follow the log's line order (died, then zoned),
-    # the event version matched by timestamp alone -- facts are the right one.
     # From the knowledge base (facts.py): mob_facts rows marked `listed`
-    # (conned / spoke / traded / looted / died -- what this page has always
-    # listed), summed over zones and tiers. Same rows as the pre-facts
-    # version (_compute_npc_list_from_events), checked by tools/verify_facts.py.
+    # (conned / spoke / traded / looted / died), summed over zones and tiers.
+    # Zones follow the log's line order, so a mob that died in the same
+    # second you zoned counts where it died.
     sql = (
         "SELECT mf.npc, MIN(mf.level_min) AS level_min, MAX(mf.level_max) AS level_max, "
         "  MAX(mf.rare) AS rare, (SUM(mf.vendor_events) > 0) AS vendor, "
@@ -2221,229 +1688,63 @@ def _compute_npc_list(game, search="", zone=""):
     return rows
 
 
-
-def _compute_npc_list_from_events(game, search="", zone=""):
-    # The pre-facts /npcs. Kept only for tools/verify_facts.py.
-    # "Test <level>" sparring dummies (see _is_test_dummy) are excluded --
-    # artificial unlimited HP, not real content worth searching/browsing.
-    sql = (
-        "WITH npc_events AS ("
-        "  SELECT ev.source_name AS npc, ev.event_type, ev.amount, ev.extra, "
-        f"    {_base_zone_expr()} AS zone "
-        "  FROM events ev JOIN games g ON ev.game_id=g.id "
-        "  WHERE g.code=%s AND ev.event_type IN ('con','npc_dialogue','vendor_buy','vendor_sell','loot') "
-        "    AND ev.source_name IS NOT NULL AND ev.source_name NOT LIKE 'Test %%' "
-        "  UNION ALL "
-        "  SELECT ev.target_name AS npc, ev.event_type, ev.amount, ev.extra, "
-        f"    {_base_zone_expr()} AS zone "
-        "  FROM events ev JOIN games g ON ev.game_id=g.id "
-        "  WHERE g.code=%s AND ev.event_type='death' AND ev.target_name IS NOT NULL AND ev.target_type != 'you' "
-        "    AND ev.target_name NOT LIKE 'Test %%'"
-        ") "
-        "SELECT npc, "
-        "  MIN(CASE WHEN event_type='con' THEN amount END) AS level_min, "
-        "  MAX(CASE WHEN event_type='con' THEN amount END) AS level_max, "
-        "  MAX(CASE WHEN event_type='con' THEN JSON_EXTRACT(extra,'$.rare') END) = 'true' AS rare, "
-        "  (SUM(CASE WHEN event_type IN ('vendor_buy','vendor_sell') THEN 1 ELSE 0 END) > 0) AS vendor, "
-        "  SUM(CASE WHEN event_type='npc_dialogue' THEN 1 ELSE 0 END) AS dialogue_lines, "
-        "  SUM(CASE WHEN event_type='death' THEN 1 ELSE 0 END) AS kills, "
-        # SQLite only allows DISTINCT on a one-argument aggregate (no custom
-        # separator), so the ','-joined list is re-spaced instead -- safe
-        # because no zone name contains a comma (0 of 86 seen, 2026-11-07).
-        "  REPLACE(GROUP_CONCAT(DISTINCT zone ORDER BY zone), ',', ', ') AS zones "
-        "FROM npc_events GROUP BY npc"
-    )
-    params = [game, game]
-    having_clauses, having_params = [], []
-    if search:
-        having_clauses.append("npc LIKE %s"); having_params.append(f"%{search}%")
-    if zone:
-        having_clauses.append("zones LIKE %s"); having_params.append(f"%{zone}%")
-    if having_clauses:
-        sql += " HAVING " + " AND ".join(having_clauses)
-        params += having_params
-    sql += " ORDER BY npc"
-
+def _compute_npc_combat_tiers(game, name):
+    # Per zone tier, from the knowledge base (facts.py): level range from
+    # cons, your kills (killing blow yours), and HP -- for rare mobs only,
+    # since only one is ever up at a time, as the range of the damage each
+    # one took until it died (it reads low if others' damage is missing from
+    # your log). An ordinary name can't be pinned to one mob, so no HP.
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(sql, params)
+            cur.execute(
+                "SELECT f.tier, MAX(zv.tier_label) AS tier_label, SUM(f.kills_by_you) AS kills, "
+                "  MIN(f.level_min) AS level_min, MAX(f.level_max) AS level_max, MAX(f.rare) AS rare, "
+                "  MIN(f.hp_min) AS hp_min, MAX(f.hp_max) AS hp_max, SUM(f.hp_samples) AS hp_samples "
+                "FROM mob_facts f JOIN games g ON g.id=f.game_id "
+                "LEFT JOIN (SELECT DISTINCT base_zone, tier, tier_label FROM zone_visits) zv "
+                "  ON zv.base_zone=f.base_zone AND zv.tier=f.tier "
+                "WHERE g.code=%s AND f.npc=%s AND (f.cons>0 OR f.kills_by_you>0) "
+                "GROUP BY f.tier ORDER BY f.tier",
+                (game, name),
+            )
             rows = cur.fetchall()
-            names = [r["npc"] for r in rows]
-            overrides = {}
-            if names:
-                fmt = ",".join(["%s"] * len(names))
-                cur.execute(f"SELECT npc, npc_type, note FROM npc_info WHERE npc IN ({fmt})", names)
-                # Matched case-insensitively -- npc_info.npc was saved via
-                # whatever casing a different query's GROUP BY happened to
-                # pick as that NPC's representative row at the time (e.g.
-                # from /npcs/{game}/detail, a separate query from this
-                # list), which can differ from this query's own pick for
-                # the exact same real NPC.
-                overrides = {r["npc"].lower(): r for r in cur.fetchall()}
     finally:
         conn.close()
-
     for r in rows:
-        override = overrides.get(r["npc"].lower())
-        r["suggested_type"] = _suggest_npc_type(r["npc"], r)
-        r["npc_type"] = (override["npc_type"] if override and override["npc_type"] else r["suggested_type"])
-        r["note"] = override["note"] if override else None
+        r["tier"] = str(r["tier"])
+        if not r["rare"]:
+            r["hp_min"] = r["hp_max"] = None
     return rows
 
 
-def _compute_npc_combat_tiers(game, name):
-    # Estimated HP per zone tier, from your own damage between the previous
-    # kill (or zone entry) and each death -- there's no per-mob-instance ID
-    # in the log, so this is an estimate, not exact HP: only source_type='you'
-    # damage counts (pet/other-player hits don't), so a group kill undercounts,
-    # and two simultaneously-up mobs sharing the same name (see tailer.py's
-    # CombatTracker docstring for the same limitation) conflate into one
-    # window, which is why min/max can spread wide for common trash names.
-    # Level range per tier comes from `con` the same way (EQ2 has no `con`
-    # parsing yet, so those rows are always level_min/max=None).
-    #
-    # Computed by bulk-fetching each character's death/zone_change/damage
-    # rows and doing the windowing here via bisect, rather than correlating
-    # tier/kill-window with per-row scalar subqueries in SQL -- the SQL
-    # version of this (nesting a kill-window scalar subquery inside a
-    # per-death correlated subquery) took over two minutes on a busy NPC;
-    # this is under 0.1s even for a 200-kill NPC. Same lesson as
-    # _compute_zone_list's docstring, applied to a per-character-timeline
-    # correlation instead of a per-zone one.
+def _compute_npc_abilities(game, name):
+    """(attacks, spells) the mob used, over every zone and tier: each melee
+    attack with its tries, hits and max hit; each skill/spell with how often
+    it was cast/landed and its max hit / max heal (facts.py)."""
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT d.character_id, d.ts AS death_ts "
-                "FROM events d JOIN games g ON d.game_id=g.id "
-                "WHERE g.code=%s AND d.event_type='death' AND d.target_name=%s "
-                "  AND d.source_type='you' AND d.target_type != 'you' "
-                "ORDER BY d.character_id, d.ts",
+                "SELECT f.kind, MIN(f.name) AS name, SUM(f.uses) AS uses, SUM(f.hits) AS hits, "
+                "  MAX(f.max_hit) AS max_hit, MAX(f.max_heal) AS max_heal "
+                "FROM npc_ability_facts f JOIN games g ON g.id=f.game_id "
+                "WHERE g.code=%s AND f.npc=%s GROUP BY f.kind, f.name",
                 (game, name),
             )
-            deaths = cur.fetchall()
-
-            cur.execute(
-                "SELECT ev.character_id, ev.ts, ev.amount AS level "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                "WHERE g.code=%s AND ev.event_type='con' AND ev.source_name=%s",
-                (game, name),
-            )
-            cons = cur.fetchall()
-
-            char_ids = sorted({r["character_id"] for r in deaths} | {r["character_id"] for r in cons})
-            zone_changes, damage = [], []
-            if char_ids:
-                fmt = ",".join(["%s"] * len(char_ids))
-                cur.execute(
-                    f"SELECT character_id, ts, JSON_EXTRACT(extra,'$.tier') AS tier, "
-                    "JSON_UNQUOTE(JSON_EXTRACT(extra,'$.tier_label')) AS tier_label "
-                    f"FROM events WHERE event_type='zone_change' AND character_id IN ({fmt}) ORDER BY character_id, ts",
-                    char_ids,
-                )
-                zone_changes = cur.fetchall()
-
-                cur.execute(
-                    "SELECT character_id, ts, amount FROM events "
-                    "WHERE event_type IN ('melee','spell_damage','ability_damage') AND source_type='you' "
-                    f"AND target_name=%s AND character_id IN ({fmt}) AND amount IS NOT NULL ORDER BY character_id, ts",
-                    [name] + char_ids,
-                )
-                damage = cur.fetchall()
+            rows = cur.fetchall()
     finally:
         conn.close()
-
-    if not deaths and not cons:
-        return []
-
-    zc_by_char = {}
-    for r in zone_changes:
-        zc = zc_by_char.setdefault(r["character_id"], {"ts": [], "rows": []})
-        zc["ts"].append(r["ts"])
-        zc["rows"].append(r)
-
-    def tier_at(char_id, ts):
-        zc = zc_by_char.get(char_id)
-        if not zc:
-            return None, None
-        i = bisect.bisect_right(zc["ts"], ts) - 1
-        return (zc["rows"][i]["tier"], zc["rows"][i]["tier_label"]) if i >= 0 else (None, None)
-
-    dmg_by_char = {}
-    for r in damage:
-        dmg = dmg_by_char.setdefault(r["character_id"], {"ts": [], "amt": []})
-        dmg["ts"].append(r["ts"])
-        dmg["amt"].append(r["amount"])
-
-    deaths_by_char = {}
-    for r in deaths:
-        deaths_by_char.setdefault(r["character_id"], []).append(r["death_ts"])
-
-    by_tier = {}
-
-    def bucket(tier):
-        return by_tier.setdefault(tier, {"tier_label": None, "kills": 0, "hp_totals": [], "levels": []})
-
-    for char_id, char_deaths in deaths_by_char.items():
-        zc = zc_by_char.get(char_id, {"ts": [], "rows": []})
-        dmg = dmg_by_char.get(char_id, {"ts": [], "amt": []})
-
-        for i, death_ts in enumerate(char_deaths):
-            tier, tier_label = tier_at(char_id, death_ts)
-
-            # Window start: the later of this character's previous kill of
-            # this same NPC name, or their most recent zone entry -- whichever
-            # bounds the fight more tightly, so an unrelated earlier kill
-            # (or a stale window reaching across a zone change) doesn't get
-            # summed in.
-            window_start = char_deaths[i - 1] if i > 0 else None
-            zi = bisect.bisect_right(zc["ts"], death_ts) - 1
-            if zi >= 0 and (window_start is None or zc["ts"][zi] > window_start):
-                window_start = zc["ts"][zi]
-
-            lo = bisect.bisect_right(dmg["ts"], window_start) if window_start else 0
-            hi = bisect.bisect_right(dmg["ts"], death_ts)
-            kill_total = sum(dmg["amt"][lo:hi])
-            if kill_total:
-                b = bucket(tier)
-                b["kills"] += 1
-                b["hp_totals"].append(kill_total)
-                if tier_label:
-                    b["tier_label"] = tier_label
-
-    for r in cons:
-        tier, tier_label = tier_at(r["character_id"], r["ts"])
-        b = bucket(tier)
-        b["levels"].append(r["level"])
-        if tier_label:
-            b["tier_label"] = tier_label
-
-    out = []
-    for tier, b in by_tier.items():
-        row = {
-            "tier": tier, "tier_label": b["tier_label"], "kills": b["kills"],
-            "level_min": min(b["levels"]) if b["levels"] else None,
-            "level_max": max(b["levels"]) if b["levels"] else None,
-        }
-        if b["hp_totals"]:
-            row["hp_min"] = min(b["hp_totals"])
-            row["hp_avg"] = round(sum(b["hp_totals"]) / len(b["hp_totals"]))
-            row["hp_max"] = max(b["hp_totals"])
-        else:
-            row["hp_min"] = row["hp_avg"] = row["hp_max"] = None
-        out.append(row)
-    return sorted(out, key=lambda r: (r["tier"] is None, r["tier"]))
+    attacks = sorted((r for r in rows if r["kind"] == "attack"), key=lambda r: (-(r["max_hit"] or 0), r["name"].lower()))
+    spells = sorted((r for r in rows if r["kind"] == "spell"), key=lambda r: r["name"].lower())
+    return attacks, spells
 
 
 def _compute_npc_detail(game, name, tier="all"):
     # From the knowledge base (facts.py): zones, level range, rare, kills,
-    # loot (and its tier pulldown) and the vendor catalog. Still from
-    # recorded events: the combat table (_compute_npc_combat_tiers -- it
-    # estimates HP for every mob, where facts keep HP only for rares) and the
-    # dialogue transcript, which is history rather than counts. Same page as
-    # the pre-facts version (_compute_npc_detail_from_events), checked by
-    # tools/verify_facts.py.
+    # loot (and its tier pulldown), the vendor catalog, the combat table
+    # (HP for rares only) and the mob's attacks and spells. The dialogue
+    # transcript is history, from the kept history lines.
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
@@ -2491,6 +1792,7 @@ def _compute_npc_detail(game, name, tier="all"):
     levels_max = [m["level_max"] for m in mobs if m["level_max"] is not None]
     is_vendor = bool(catalog) or any(m["vendor_events"] for m in mobs)
     detail = _npc_dialogue_part(game, name)
+    attacks, spells = _compute_npc_abilities(game, name)
     suggested_type = _suggest_npc_type(name, {"vendor": is_vendor})
     return {
         "name": name,
@@ -2500,6 +1802,8 @@ def _compute_npc_detail(game, name, tier="all"):
         "rare": any(m["rare"] for m in mobs),
         "total_kills": sum(m["deaths"] for m in mobs),
         "combat_tiers": _compute_npc_combat_tiers(game, name),
+        "attacks": attacks,
+        "spells": spells,
         "vendor": is_vendor,
         "catalog": catalog,
         "loot": loot,
@@ -2514,7 +1818,7 @@ def _compute_npc_detail(game, name, tier="all"):
 
 def _npc_dialogue_part(game, name):
     """The NPC page's dialogue transcript and quest begun/ended markers --
-    history, so from recorded events."""
+    history, so from the kept history lines."""
     dialogue = _compute_dialogue(game, character="", npc=name, zone="")
     # Best-effort "quest begun/ended" markers -- classic EQ rarely logs a
     # turn-in action at all (only one confirmed real example exists across
@@ -2532,123 +1836,6 @@ def _npc_dialogue_part(game, name):
     quest_ended_at = max((r["ts"] for r in ended_rows), default=None)
 
     return {"dialogue": dialogue, "quest_begun_at": quest_begun_at, "quest_ended_at": quest_ended_at}
-
-
-def _compute_npc_detail_from_events(game, name, tier="all"):
-    # The pre-facts NPC detail. Kept only for tools/verify_facts.py.
-    tier_expr = _tier_expr()
-    conn = db.get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT DISTINCT " + _base_zone_expr() + " AS zone "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                "WHERE g.code=%s AND ((ev.source_name=%s AND ev.event_type IN ('con','npc_dialogue','loot','vendor_buy','vendor_sell')) "
-                "  OR (ev.target_name=%s AND ev.event_type='death' AND ev.target_type != 'you'))",
-                (game, name, name),
-            )
-            zones = sorted(r["zone"] for r in cur.fetchall() if r["zone"])
-
-            # Tiers this NPC's loot has actually been seen in, to build the
-            # loot pulldown -- same "collapse instance variants, toggle
-            # separately" idea as the zone detail page's tier toggle.
-            cur.execute(
-                f"SELECT DISTINCT {tier_expr} AS tier, "
-                "JSON_UNQUOTE(JSON_EXTRACT((SELECT z.extra FROM events z WHERE z.event_type='zone_change' "
-                "  AND z.character_id=ev.character_id AND z.ts<=ev.ts ORDER BY z.ts DESC LIMIT 1),'$.tier_label')) AS tier_label "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                "WHERE g.code=%s AND ev.event_type='loot' AND ev.source_name=%s",
-                (game, name),
-            )
-            loot_tiers = cur.fetchall()
-
-            loot_clauses, loot_params = ["ev.event_type='loot'", "ev.source_name=%s"], [name]
-            if tier != "all":
-                loot_clauses.append(f"COALESCE({tier_expr}, 0) = %s"); loot_params.append(int(tier))
-            cur.execute(
-                "SELECT ev.target_name AS item, ROUND(AVG(ev.amount),1) AS avg_qty, COUNT(*) AS drops "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                f"WHERE g.code=%s AND {' AND '.join(loot_clauses)} "
-                "GROUP BY ev.target_name ORDER BY item",
-                [game] + loot_params,
-            )
-            loot = cur.fetchall()
-
-            cur.execute(
-                "SELECT MIN(amount) AS level_min, MAX(amount) AS level_max, "
-                "MAX(JSON_EXTRACT(extra,'$.rare'))='true' AS rare "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                "WHERE g.code=%s AND ev.event_type='con' AND ev.source_name=%s",
-                (game, name),
-            )
-            con_stats = cur.fetchone()
-
-            # Total kills across every character/session, same "credit
-            # doesn't have to be yours" definition as the zone detail
-            # page's npc list and /characters' per-zone kills (target_type
-            # != 'you' excludes only the NPC killing *you*, not group/raid
-            # kills where a groupmate or pet landed the blow) -- NOT the
-            # combat_tiers table below, which deliberately restricts to
-            # source_type='you' because it pairs each kill with your own
-            # damage to estimate HP, and undercounts group kills as a
-            # result (see its own docstring/caption). Confirmed real
-            # (2026-09-22): Phinigel Autropos showed only 7 across
-            # combat_tiers -- all of them from days where "You" landed the
-            # kill -- while 16 more real deaths exist with the kill
-            # credited to a groupmate (source_type/target_type='unknown'),
-            # 23 total. Cheap: straight index hit on
-            # idx_game_type_target, no correlation involved.
-            cur.execute(
-                "SELECT COUNT(*) AS n FROM events ev JOIN games g ON ev.game_id=g.id "
-                "WHERE g.code=%s AND ev.event_type='death' AND ev.target_name=%s AND ev.target_type != 'you'",
-                (game, name),
-            )
-            total_kills = cur.fetchone()["n"]
-
-            cur.execute(
-                "SELECT ev.target_name AS item, ev.amount AS qty, "
-                "JSON_UNQUOTE(JSON_EXTRACT(ev.extra,'$.price_text')) AS price "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                "WHERE g.code=%s AND ev.event_type='vendor_buy' AND ev.source_name=%s "
-                "GROUP BY ev.target_name, ev.amount, price ORDER BY item",
-                (game, name),
-            )
-            catalog = cur.fetchall()
-            is_vendor = bool(catalog)
-            if not is_vendor:
-                cur.execute(
-                    "SELECT COUNT(*) AS n FROM events ev JOIN games g ON ev.game_id=g.id "
-                    "WHERE g.code=%s AND ev.event_type='vendor_sell' AND ev.source_name=%s",
-                    (game, name),
-                )
-                is_vendor = cur.fetchone()["n"] > 0
-
-            cur.execute("SELECT npc_type, note FROM npc_info WHERE npc=%s", (name,))
-            override = cur.fetchone()
-    finally:
-        conn.close()
-
-    detail = _npc_dialogue_part(game, name)
-
-    suggested_type = _suggest_npc_type(name, {"vendor": is_vendor})
-    return {
-        "name": name,
-        "zones": zones,
-        "level_min": con_stats["level_min"],
-        "level_max": con_stats["level_max"],
-        "rare": bool(con_stats["rare"]),
-        "total_kills": total_kills,
-        "combat_tiers": _compute_npc_combat_tiers(game, name),
-        "vendor": is_vendor,
-        "catalog": catalog,
-        "loot": loot,
-        "loot_tiers": loot_tiers,
-        "tier": tier,
-        **detail,
-        "npc_type": (override["npc_type"] if override and override["npc_type"] else suggested_type),
-        "suggested_type": suggested_type,
-        "note": override["note"] if override else None,
-    }
 
 
 @app.get("/npcs/eql", response_class=HTMLResponse)

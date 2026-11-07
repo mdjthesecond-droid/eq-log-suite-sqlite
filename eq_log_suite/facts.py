@@ -32,6 +32,25 @@ attributes everything to a zone in the first place:
 * ground spawns item picked up off the ground, per zone (ground_spawn_facts)
 * vendor catalog item x quantity x price you bought from a vendor
                 (vendor_catalog_facts, per vendor -- not per zone)
+* abilities     what a mob attacks with (npc_ability_facts): each melee
+                attack (tries, hits, max hit) and each skill/spell -- cast
+                ("begins casting X"), landed ("... by X", damage over time)
+                or healed with (max hit, max heal). Damage shields aren't
+                the mob attacking, so they're left out.
+
+And per character, history -- what the Database view's history pages show:
+
+* zone visits   each zone you entered (zone_visits), summarized: when you
+                left, your damage/swings/hits/crits and first/last fight
+                there, your last line there (for a log that just ended).
+                Each zone change also notes how soon after your last spell
+                cast and your last Gate/Origin it came (cast_s_before /
+                gate_s_before in its extra) -- what /zoneinfo's connections
+                and PoK books need, so your casts themselves aren't kept.
+* history lines the events table keeps only HISTORY_TYPES: zone changes,
+                group, kills and loot, and every dialogue/quest/task line.
+                Combat lines (and raw lines) aren't stored at all: they live
+                in the log file, and the Live view re-reads them from there.
 * HP            only for rare mobs: one is only ever up at a time, so the
                 damage it took until it died is its HP. Ordinary names can't
                 be pinned to one mob (three "a ghoul"s at once), so no HP for
@@ -50,8 +69,21 @@ current zone and in-progress fight damage); observe() each recorded event,
 flush() before every commit on the same connection.
 """
 
-import json
 from datetime import timedelta
+
+# The only event types kept in the permanent events table -- history the
+# Database pages show (dialogue, quests, tasks, zone visits' kills/loot,
+# group membership for "your kills"). Everything else contributes to facts
+# and is dropped.
+HISTORY_TYPES = frozenset({
+    "zone_change", "group", "death", "loot",
+    "hail", "say", "npc_dialogue", "reward", "item_offer", "trade_complete",
+    "quest", "task_assigned", "task_updated", "task_reward", "exp", "faction",
+})
+GATE_SPELLS = ("Gate", "Origin")
+# A zone change this soon after a cast wasn't walked (real gate/origin casts
+# land the zone change ~10-20s later) -- see /zoneinfo's connections.
+GATE_EXCLUSION_WINDOW_S = 60
 
 DAMAGE_TYPES = ("melee", "spell_damage", "ability_damage")
 # Lines that put both sides "in a fight" (the `fought` fact).
@@ -81,7 +113,11 @@ class FactExtractor:
         self.loot: dict = {}        # pending deltas, keyed (npc, base_zone, tier, solo, item)
         self.ground: dict = {}      # pending deltas, keyed (base_zone, tier, solo, item)
         self.catalog: dict = {}     # pending deltas, keyed (npc, item, qty, price_text)
-        self.visits: list = []
+        self.visit = None           # the zone visit lines are landing in (see _new_visit)
+        self.visits: list = []      # visits with unwritten changes
+        self.abilities: dict = {}   # pending, keyed (npc, base_zone, tier, solo, kind, name)
+        self.last_cast = None       # your last spell cast's ts, and your last Gate/Origin's
+        self.last_gate = None
         self.fight: dict = {}       # npc -> [damage taken so far, last hit ts], for rare HP
         self.engaged: dict = {}     # npc -> last time you and it traded hits
         self.uncounted: dict = {}   # npc -> (mob key, death ts) of its last death not yet counted as yours
@@ -95,12 +131,13 @@ class FactExtractor:
     def _resolve_zone(self, ts):
         with self.conn.cursor() as cur:
             cur.execute(
-                "SELECT base_zone, tier, solo FROM zone_visits WHERE character_id=%s AND ts<=%s "
+                "SELECT id, base_zone, tier, solo FROM zone_visits WHERE character_id=%s AND ts<=%s "
                 "ORDER BY ts DESC, id DESC LIMIT 1",
                 (self.character_id, ts),
             )
             row = cur.fetchone()
             if row:
+                self.visit = self._new_visit(row["id"])
                 return (row["base_zone"], row["tier"], row["solo"])
             cur.execute("SELECT zone FROM zone_start_overrides WHERE character_id=%s", (self.character_id,))
             row = cur.fetchone()
@@ -133,6 +170,61 @@ class FactExtractor:
                 group.discard(who.lower())
         return group
 
+    @staticmethod
+    def _new_visit(visit_id=None, row=None):
+        """A zone visit: its row (None until written) plus unwritten changes."""
+        return {"id": visit_id, "row": row, "left_at": None, "last_line": None, "first_fight": None,
+                "last_fight": None, "damage": 0, "swings": 0, "landed": 0, "crits": 0}
+
+    def _touch_visit(self):
+        v = self.visit
+        if v is not None and not any(v is x for x in self.visits):
+            self.visits.append(v)
+        return v
+
+    def _visit_line(self, ev, ts):
+        """Folds a line into the current visit's summary."""
+        v = self._touch_visit()
+        if v is None:
+            return
+        v["last_line"] = ts if v["last_line"] is None else max(v["last_line"], ts)
+        if ev.event_type in DAMAGE_TYPES and ev.source_type == "you":
+            v["first_fight"] = ts if v["first_fight"] is None else min(v["first_fight"], ts)
+            v["last_fight"] = ts if v["last_fight"] is None else max(v["last_fight"], ts)
+            v["damage"] += ev.amount or 0
+            if ev.event_type == "melee":
+                v["swings"] += 1
+                if ev.outcome in ("hit", "crit"):
+                    v["landed"] += 1
+                if ev.outcome == "crit":
+                    v["crits"] += 1
+
+    def _ability(self, npc, kind, name, used=0, hit=None, heal=None):
+        key = (npc,) + self.zone + (kind, name)
+        a = self.abilities.setdefault(key, [0, 0, None, None])
+        a[0] += used
+        if hit is not None:
+            a[1] += 1
+            a[2] = hit if a[2] is None else max(a[2], hit)
+        if heal is not None:
+            a[3] = heal if a[3] is None else max(a[3], heal)
+
+    def _abilities(self, ev, et, extra):
+        who = ev.source_name
+        if not who or ev.source_type == "you" or _is_dummy(who) or not ev.verb:
+            return
+        if et == "melee":
+            if extra.get("proc"):          # "X hit you for N points of magic damage by Wrath."
+                self._ability(who, "spell", ev.verb, hit=ev.amount)
+            else:                           # "X bashes YOU for N" / "X tries to bash YOU, but misses!"
+                self._ability(who, "attack", ev.verb, used=1, hit=ev.amount)
+        elif et == "spell_damage" and not extra.get("damage_shield"):
+            self._ability(who, "spell", ev.verb, hit=ev.amount)
+        elif et == "spell_cast":
+            self._ability(who, "spell", ev.verb, used=1)
+        elif et == "spell_heal" and ev.amount:
+            self._ability(who, "spell", ev.verb, heal=ev.amount)
+
     # -- facts --------------------------------------------------------------
 
     def _mob(self, npc, ts, key=None):
@@ -157,18 +249,35 @@ class FactExtractor:
             self.zone = self._resolve_zone(ts)
             self.group = self._resolve_group(ts)
         et = ev.event_type
-        extra = ev.extra or {}
-
-        if et == "group":
-            self.group = self._apply_group(self.group, ev.source_name, ev.source_type, ev.verb)
-            return
+        if ev.extra is None:
+            ev.extra = {}
+        extra = ev.extra
 
         if et == "zone_change" and ev.source_type == "you":
+            # How soon after your last cast / Gate this came -- kept on the
+            # zone change itself, since the casts aren't stored.
+            for key, last in (("cast_s_before", self.last_cast), ("gate_s_before", self.last_gate)):
+                if last is not None and 0 <= (ts - last).total_seconds() <= GATE_EXCLUSION_WINDOW_S:
+                    extra[key] = int((ts - last).total_seconds())
+            if self._touch_visit() is not None:
+                self.visit["left_at"] = ts
             base = extra.get("base_zone") or ev.target_name or ""
             tier = int(extra.get("tier") or 0)
             solo = 1 if extra.get("solo") else 0
             self.zone = (base, tier, solo)
-            self.visits.append((ts, ev.target_name or base, base, tier, extra.get("tier_label"), solo))
+            self.visit = self._new_visit(row=(ts, ev.target_name or base, base, tier, extra.get("tier_label"), solo))
+            self._visit_line(ev, ts)
+            return
+
+        self._visit_line(ev, ts)
+        self._abilities(ev, et, extra)
+        if et == "spell_cast" and ev.source_type == "you":
+            self.last_cast = ts
+            if ev.verb in GATE_SPELLS:
+                self.last_gate = ts
+
+        if et == "group":
+            self.group = self._apply_group(self.group, ev.source_name, ev.source_type, ev.verb)
             return
 
         if et in FIGHT_TYPES:
@@ -266,14 +375,42 @@ class FactExtractor:
     def flush(self):
         """Writes pending facts. Doesn't commit -- the caller commits them
         together with the lines they came from."""
-        if not (self.mobs or self.loot or self.ground or self.catalog or self.visits):
+        if not (self.mobs or self.loot or self.ground or self.catalog or self.abilities or self.visits):
             return
         with self.conn.cursor() as cur:
-            for ts, name, base, tier, label, solo in self.visits:
+            for v in self.visits:
+                stats = (v["damage"], v["swings"], v["landed"], v["crits"])
+                if v["id"] is None:
+                    ts, name, base, tier, label, solo = v["row"]
+                    cur.execute(
+                        "INSERT INTO zone_visits (character_id, ts, zone_name, base_zone, tier, tier_label, solo, "
+                        "left_at, last_line_at, first_fight_at, last_fight_at, total_damage, swings, landed, crits) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (self.character_id, ts, name, base, tier, label, solo, v["left_at"], v["last_line"],
+                         v["first_fight"], v["last_fight"]) + stats,
+                    )
+                    v["id"] = cur.lastrowid
+                else:
+                    cur.execute(
+                        "UPDATE zone_visits SET left_at = COALESCE(%s, left_at), "
+                        "last_line_at = COALESCE(MAX(last_line_at, %s), last_line_at, %s), "
+                        "first_fight_at = COALESCE(MIN(first_fight_at, %s), first_fight_at, %s), "
+                        "last_fight_at = COALESCE(MAX(last_fight_at, %s), last_fight_at, %s), "
+                        "total_damage = total_damage + %s, swings = swings + %s, landed = landed + %s, "
+                        "crits = crits + %s WHERE id=%s",
+                        (v["left_at"], v["last_line"], v["last_line"], v["first_fight"], v["first_fight"],
+                         v["last_fight"], v["last_fight"]) + stats + (v["id"],),
+                    )
+                v.update(self._new_visit(v["id"], v["row"]))
+            for (npc, base, tier, solo, kind, name), (uses, hits, max_hit, max_heal) in self.abilities.items():
                 cur.execute(
-                    "INSERT INTO zone_visits (character_id, ts, zone_name, base_zone, tier, tier_label, solo) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                    (self.character_id, ts, name, base, tier, label, solo),
+                    "INSERT INTO npc_ability_facts (game_id, npc, base_zone, tier, solo, kind, name, uses, hits, "
+                    "max_hit, max_heal) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT (game_id, npc, base_zone, tier, solo, kind, name) DO UPDATE SET "
+                    "uses = uses + excluded.uses, hits = hits + excluded.hits, "
+                    "max_hit = COALESCE(MAX(max_hit, excluded.max_hit), max_hit, excluded.max_hit), "
+                    "max_heal = COALESCE(MAX(max_heal, excluded.max_heal), max_heal, excluded.max_heal)",
+                    (self.game_id, npc, base, tier, solo, kind, name, uses, hits, max_hit, max_heal),
                 )
             for (npc, base, tier, solo), m in self.mobs.items():
                 hp = m["hp"]
@@ -325,55 +462,89 @@ class FactExtractor:
         self.loot.clear()
         self.ground.clear()
         self.catalog.clear()
+        self.abilities.clear()
         self.visits.clear()
 
 
-class _Row:
-    """An events-table row shaped like a ParsedEvent, for rebuild()."""
-    __slots__ = ("ts", "event_type", "source_name", "source_type", "target_name", "target_type", "amount", "verb", "extra")
+FACT_TABLES = ("loot_facts", "ground_spawn_facts", "vendor_catalog_facts", "npc_ability_facts", "mob_facts")
 
-    def __init__(self, r):
-        for k in self.__slots__[:-1]:
-            setattr(self, k, r[k])
-        self.extra = json.loads(r["extra"]) if r["extra"] else None
+
+def _first_ts(path):
+    """The first timestamp in a log, for reading logs oldest first."""
+    from eq_log_suite.parsers.registry import detect_parser
+    parser = detect_parser(path)
+    with open(path, "rb") as f:
+        for _ in range(200):
+            line = f.readline()
+            if not line:
+                break
+            ts = parser.parse_timestamp(line.decode("utf-8", "replace").rstrip("\r\n")) if parser else None
+            if ts:
+                return ts[0]
+    return None
+
+
+def backup(conn, verbose=True):
+    """Copies the database to data/backups/<name>-<time>.sqlite3 first."""
+    from datetime import datetime
+    from eq_log_suite import db
+    src = db.sqlite_path()
+    dest = src.parent / "backups" / f"{src.stem}-{datetime.now():%Y%m%d-%H%M%S}.sqlite3"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    import sqlite3
+    out = sqlite3.connect(str(dest))
+    try:
+        conn.raw.backup(out)
+    finally:
+        out.close()
+    if verbose:
+        print(f"  backed up to {dest}")
+    return dest
 
 
 def rebuild(conn, verbose=True):
-    """Recomputes every fact from the events already recorded -- for a
-    database recorded before facts existed, or after a change to what's
-    extracted. Replaces all facts; one transaction."""
+    """Re-reads every recorded log file from the start with the current
+    parser, replacing all facts and history -- for after a change to what's
+    extracted. The log files are the permanent record (combat lines aren't
+    stored), so every one has to still exist; nothing is touched if one
+    doesn't. Backs the database up first. Keeps everything you entered
+    (alert rules, NPC/zone notes and overrides, settings). Run it with the
+    app stopped."""
+    import os
+    from eq_log_suite.importer import import_file
     with conn.cursor() as cur:
-        for t in ("loot_facts", "ground_spawn_facts", "vendor_catalog_facts", "mob_facts", "zone_visits"):
+        cur.execute(
+            "SELECT ls.id, ls.file_path, g.code AS game, c.name, c.server FROM log_sources ls "
+            "JOIN games g ON g.id=ls.game_id JOIN characters c ON c.id=ls.character_id"
+        )
+        sources = cur.fetchall()
+        cur.execute("SELECT DISTINCT log_source_id FROM recorded_ranges")
+        recorded = {r["log_source_id"] for r in cur.fetchall()}
+    sources = [s for s in sources if s["id"] in recorded]   # selected once but never read: nothing to redo
+    missing = [s["file_path"] for s in sources if not os.path.isfile(s["file_path"])]
+    if missing:
+        raise SystemExit("Not rebuilding -- these recorded logs no longer exist (move them back first):\n  "
+                         + "\n  ".join(missing))
+    backup(conn, verbose)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE alert_log SET event_id=NULL")
+        cur.execute("DROP TABLE IF EXISTS raw_lines")   # no longer kept at all
+        for t in FACT_TABLES + ("zone_visits", "events", "range_edge_lines", "recorded_ranges"):
             cur.execute(f"DELETE FROM {t}")
-        cur.execute("SELECT id, game_id FROM characters")
-        chars = cur.fetchall()
-    for ch in chars:
-        fx = FactExtractor(conn, ch["game_id"], ch["id"])
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT ts, event_type, source_name, source_type, target_name, target_type, amount, verb, extra "
-                "FROM events WHERE character_id=%s ORDER BY ts, id",
-                (ch["id"],),
-            )
-            n = 0
-            while True:
-                rows = cur.fetchmany(5000)
-                if not rows:
-                    break
-                for r in rows:
-                    fx.observe(_Row(r))
-                n += len(rows)
-                fx.flush()
-        if verbose:
-            print(f"  character {ch['id']}: {n:,} events")
+        cur.execute("UPDATE log_sources SET last_byte_offset=0, fingerprint=NULL")
     conn.commit()
+    for src in sorted(sources, key=lambda s: (_first_ts(s["file_path"]) is None, _first_ts(s["file_path"]) or 0)):
+        if verbose:
+            print(f"  reading {src['file_path']}")
+        import_file(src["file_path"], src["game"], src["name"], src["server"])
+    conn.raw.execute("VACUUM")
 
 
 if __name__ == "__main__":
     from eq_log_suite import db
     c = db.get_connection()
     try:
-        print("Rebuilding facts from recorded events...")
+        print("Rebuilding facts and history from the recorded log files...")
         rebuild(c)
     finally:
         c.close()

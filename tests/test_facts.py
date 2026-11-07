@@ -191,6 +191,51 @@ def test_fought_ground_spawns_and_vendor_catalog():
     assert catalog == [("Innkeep Evelona", "Water Flask", 100, "1 platinum", 2)], catalog
 
 
+def test_only_history_is_stored_and_visits_are_summarized():
+    # Real line formats (Lady Vox, 2026-09; your casts/Gate, 2026-09-19).
+    d = TMP / "vox"
+    d.mkdir()
+    log = d / "eqlog_Foxtrot_s1.txt"
+    log.write_text("".join([
+        L(0, "You have entered Permafrost Keep."),
+        L(1, "You pierce Lady Vox for 67 points of damage."),
+        L(2, "You pierce Lady Vox for 138 points of damage. (Critical)"),
+        L(3, "You try to pierce Lady Vox, but miss!"),
+        L(4, "Lady Vox pierces YOU for 68 points of damage."),
+        L(5, "Lady Vox pierces YOU for 74 points of damage."),
+        L(6, "Lady Vox begins casting Immobilize."),
+        L(7, "Lady Vox hit you for 415 points of cold damage by Frost Breath."),
+        L(8, "You have slain Lady Vox!"),
+        L(20, "You begin casting Gate."),
+        L(35, "You have entered The Plane of Knowledge."),
+        L(40, "You begin casting Tashania."),
+    ]), newline="")
+    import_file(str(log), "eql", None, None)
+    conn = db.get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT event_type FROM events ev JOIN characters c ON c.id=ev.character_id "
+                        "WHERE c.name='Foxtrot' ORDER BY ev.id")
+            assert [r["event_type"] for r in cur.fetchall()] == ["zone_change", "death", "zone_change"]
+            cur.execute("SELECT zv.* FROM zone_visits zv JOIN characters c ON c.id=zv.character_id "
+                        "WHERE c.name='Foxtrot' ORDER BY zv.ts")
+            keep, pok = cur.fetchall()
+            cur.execute("SELECT extra FROM events ev JOIN characters c ON c.id=ev.character_id "
+                        "WHERE c.name='Foxtrot' AND event_type='zone_change' ORDER BY ev.id")
+            extras = [r["extra"] for r in cur.fetchall()]
+    finally:
+        conn.close()
+    assert (keep["total_damage"], keep["swings"], keep["landed"], keep["crits"]) == (205, 3, 2, 1), dict(keep)
+    assert (keep["first_fight_at"], keep["last_fight_at"]) == (BASE + timedelta(seconds=1), BASE + timedelta(seconds=3))
+    assert keep["left_at"] == BASE + timedelta(seconds=35)
+    assert pok["left_at"] is None and pok["last_line_at"] == BASE + timedelta(seconds=40)
+    assert '"gate_s_before": 15' in extras[1] and '"cast_s_before": 15' in extras[1], extras
+    abilities = {(r["kind"], r["name"]): (r["uses"], r["hits"], r["max_hit"])
+                 for r in facts_rows("npc_ability_facts", "npc, kind, name, uses, hits, max_hit") if r["npc"] == "Lady Vox"}
+    assert abilities == {("attack", "pierce"): (2, 2, 74), ("spell", "Immobilize"): (1, 0, None),
+                         ("spell", "Frost Breath"): (0, 1, 415)}, abilities
+
+
 def test_copy_of_same_log_adds_no_facts():
     before = ([dict(r) for r in facts_rows("mob_facts")], [dict(r) for r in facts_rows("loot_facts")],
               [dict(r) for r in facts_rows("ground_spawn_facts")],
@@ -206,11 +251,25 @@ def test_copy_of_same_log_adds_no_facts():
     assert len(facts_rows("zone_visits")) == visits_before
 
 
-def test_rebuild_from_events_matches_incremental():
+def _visits_and_history():
+    """Zone visit summaries and kept history, without row ids (a rebuild renumbers them)."""
+    conn = db.get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM zone_visits ORDER BY character_id, ts")
+            visits = [{k: v for k, v in r.items() if k != "id"} for r in cur.fetchall()]
+            cur.execute("SELECT character_id, ts, event_type, raw_line, extra FROM events ORDER BY character_id, ts, line_no")
+            return visits, [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def test_rebuild_from_logs_matches_incremental():
     incremental = ([dict(r) for r in facts_rows("mob_facts")], [dict(r) for r in facts_rows("loot_facts")],
                    [dict(r) for r in facts_rows("ground_spawn_facts")],
                    [dict(r) for r in facts_rows("vendor_catalog_facts")],
-                   [(r["zone_name"], r["ts"]) for r in facts_rows("zone_visits", "zone_name, ts")])
+                   [dict(r) for r in facts_rows("npc_ability_facts")],
+                   _visits_and_history())
     conn = db.get_connection()
     try:
         facts.rebuild(conn, verbose=False)
@@ -219,7 +278,8 @@ def test_rebuild_from_events_matches_incremental():
     rebuilt = ([dict(r) for r in facts_rows("mob_facts")], [dict(r) for r in facts_rows("loot_facts")],
                [dict(r) for r in facts_rows("ground_spawn_facts")],
                [dict(r) for r in facts_rows("vendor_catalog_facts")],
-               [(r["zone_name"], r["ts"]) for r in facts_rows("zone_visits", "zone_name, ts")])
+               [dict(r) for r in facts_rows("npc_ability_facts")],
+               _visits_and_history())
     assert incremental == rebuilt
 
 

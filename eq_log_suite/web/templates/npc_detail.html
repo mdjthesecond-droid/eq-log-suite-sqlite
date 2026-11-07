@@ -16,25 +16,47 @@
 
 {% if combat_tiers %}
 <h2>Combat</h2>
-<p style="opacity:0.7;">Per-tier HP estimated from your own damage between the previous kill (or
-zone entry) and each death, so the "kills" column below only counts deaths where <em>you</em>
-landed the blow -- it undercounts group kills on purpose (that's the {{ total_kills }} total
-above, group credit included) because a groupmate's or pet's damage can't be paired with a kill
-to estimate HP. Two same-named mobs up at once also conflate into one window, which is why min/max
-can spread wide for common trash names. Level range is from <code>con</code>.</p>
+<p style="opacity:0.7;">Per tier: level range from <code>con</code>, and kills where <em>you</em> landed
+the blow (the {{ total_kills }} total above includes group credit). HP is kept only for rare mobs --
+one is only ever up at a time, so the damage each one took until it died is its HP. It reads low if
+someone else's damage isn't in your log, so trust the high end more.</p>
 <table class="sortable">
-  <thead><tr><th>tier</th><th>level range</th><th>your kills</th><th>est. HP (min / avg / max)</th></tr></thead>
+  <thead><tr><th>tier</th><th>level range</th><th>your kills</th><th>HP (min / max)</th></tr></thead>
   <tbody>
     {% for t in combat_tiers %}
     <tr>
       <td>{{ 'Base' if not t.tier or t.tier == '0' else (t.tier_label or 'Tier') ~ ' ' ~ t.tier }}</td>
       <td>{% if t.level_min is not none %}{{ t.level_min }}{% if t.level_max != t.level_min %}-{{ t.level_max }}{% endif %}{% else %}--{% endif %}</td>
       <td>{{ t.kills }}</td>
-      <td>{% if t.hp_min is not none %}{{ t.hp_min }} / {{ t.hp_avg }} / {{ t.hp_max }}{% else %}--{% endif %}</td>
+      <td>{% if t.hp_min is not none %}{{ t.hp_min }}{% if t.hp_max != t.hp_min %} / {{ t.hp_max }}{% endif %}{% elif t.rare %}--{% else %}<span style="opacity:0.6;">rares only</span>{% endif %}</td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
+{% endif %}
+
+{% if attacks or spells %}
+<h2>Attacks &amp; spells</h2>
+<p style="opacity:0.7;">What it's been seen using, across every zone and tier. Max hit is the biggest
+single hit in your log (on anyone).</p>
+<div style="display:flex; gap:2rem; flex-wrap:wrap; align-items:flex-start;">
+{% if attacks %}
+<table class="sortable">
+  <thead><tr><th>attack</th><th>max hit</th><th>hits / tries</th></tr></thead>
+  <tbody>
+    {% for a in attacks %}<tr><td>{{ a.name }}</td><td>{{ a.max_hit if a.max_hit is not none else '--' }}</td><td>{{ a.hits }} / {{ a.uses }}</td></tr>{% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% if spells %}
+<table class="sortable">
+  <thead><tr><th>skill / spell</th><th>casts</th><th>landed</th><th>max hit</th><th>max heal</th></tr></thead>
+  <tbody>
+    {% for a in spells %}<tr><td>{{ a.name }}</td><td>{{ a.uses or '' }}</td><td>{{ a.hits or '' }}</td><td>{{ a.max_hit if a.max_hit is not none else '' }}</td><td>{{ a.max_heal if a.max_heal is not none else '' }}</td></tr>{% endfor %}
+  </tbody>
+</table>
+{% endif %}
+</div>
 {% endif %}
 
 <details style="margin-bottom:1rem;">

@@ -2,8 +2,8 @@
 EQ-client-derived game using the standard `[Day Mon DD HH:MM:SS YYYY] text`
 log format). Patterns were derived from a full scan of a real 34MB log
 (eqlog_Cheerful_rivervale.txt) rather than guessed, but coverage is not
-exhaustive -- unmatched lines simply aren't decomposed into `events` and
-still land in `raw_lines`, so nothing is lost and coverage can grow later.
+exhaustive -- unmatched lines are simply skipped. They're still in the log
+file, so coverage can grow later (and a rebuild picks them up).
 """
 
 import re
@@ -13,7 +13,7 @@ from eq_log_suite.parsers.base import GameParser, strip_item_article
 
 # Third-person conjugated melee verbs seen (or expected) in combat lines,
 # e.g. "Gonekab crushes Baron Telyx V`Zher for 13 points of damage."
-# Extend this list as new verbs show up in unmatched raw_lines.
+# Extend this list as new verbs show up in unmatched log lines.
 MELEE_VERBS_3P = (
     "hits", "crushes", "slashes", "pierces", "cleaves", "bashes", "kicks",
     "punches", "bites", "backstabs", "claws", "stings", "gores", "mauls",
@@ -527,7 +527,7 @@ def parse_zone_tier(zone_name):
 # that share the exact same sentence shape but aren't a real zone
 # transition -- e.g. "...an area where levitation effects do not function."
 # on crossing into a no-fly section of whatever zone you're already in.
-# Left unmatched (falls through to raw_lines) rather than overwriting the
+# Left unmatched (an unmatched line) rather than overwriting the
 # real current zone for anything correlated against zone_change afterward.
 _ZONE_CHANGE_FALSE_POSITIVES = {
     "an area where levitation effects do not function",
@@ -634,7 +634,7 @@ def h_npc_dialogue(m):
     npc = m.group("npc")
     if npc.rstrip().lower().endswith("'s corpse"):
         # Death-rattle line (e.g. "Orc centurion's corpse says, '...'"),
-        # not real dialogue -- falls through to raw_lines, nothing lost.
+        # not real dialogue -- left unmatched.
         return None
     text = m.group("text")
     extra = {"text": text}

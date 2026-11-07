@@ -108,6 +108,14 @@ _ADDED_COLUMNS = [
     ("mob_facts", "vendor_events", "INTEGER NOT NULL DEFAULT 0"),
     ("mob_facts", "listed", "INTEGER NOT NULL DEFAULT 0"),
     ("mob_facts", "fought", "INTEGER NOT NULL DEFAULT 0"),
+    ("zone_visits", "left_at", "TEXT NULL"),
+    ("zone_visits", "last_line_at", "TEXT NULL"),
+    ("zone_visits", "first_fight_at", "TEXT NULL"),
+    ("zone_visits", "last_fight_at", "TEXT NULL"),
+    ("zone_visits", "total_damage", "INTEGER NOT NULL DEFAULT 0"),
+    ("zone_visits", "swings", "INTEGER NOT NULL DEFAULT 0"),
+    ("zone_visits", "landed", "INTEGER NOT NULL DEFAULT 0"),
+    ("zone_visits", "crits", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

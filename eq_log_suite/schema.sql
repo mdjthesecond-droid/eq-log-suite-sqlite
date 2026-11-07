@@ -60,15 +60,6 @@ CREATE TABLE IF NOT EXISTS events (
     line_no INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS raw_lines (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    log_source_id INTEGER NOT NULL REFERENCES log_sources(id),
-    line_no INTEGER NOT NULL,
-    ts TEXT NULL,
-    raw_text TEXT COLLATE NOCASE NOT NULL,
-    event_id INTEGER NULL REFERENCES events(id)
-);
-
 CREATE TABLE IF NOT EXISTS alert_rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     game_id INTEGER NULL REFERENCES games(id),  -- NULL = applies to all games
@@ -194,7 +185,16 @@ CREATE TABLE IF NOT EXISTS zone_visits (
     base_zone TEXT COLLATE NOCASE NOT NULL,      -- "The Permafrost Caverns"
     tier INTEGER NOT NULL DEFAULT 0,
     tier_label TEXT COLLATE NOCASE NULL,         -- "Refined"
-    solo INTEGER NOT NULL DEFAULT 0
+    solo INTEGER NOT NULL DEFAULT 0,
+    -- the visit's summary (facts.py) -- /zones
+    left_at TEXT NULL,                           -- your next zone change; NULL while it's the latest
+    last_line_at TEXT NULL,                      -- your last line here (a log that just ended)
+    first_fight_at TEXT NULL,                    -- your first/last damage here
+    last_fight_at TEXT NULL,
+    total_damage INTEGER NOT NULL DEFAULT 0,     -- your damage
+    swings INTEGER NOT NULL DEFAULT 0,           -- your melee attempts / hits / crits
+    landed INTEGER NOT NULL DEFAULT 0,
+    crits INTEGER NOT NULL DEFAULT 0
 );
 
 -- One row per mob x zone x tier x solo it's been seen in. base_zone '' =
@@ -249,6 +249,24 @@ CREATE TABLE IF NOT EXISTS ground_spawn_facts (
     PRIMARY KEY (game_id, base_zone, tier, solo, item)
 );
 
+-- What a mob attacks with, per zone x tier x solo. kind 'attack': a melee
+-- attack (uses = tries, hits = landed). kind 'spell': a skill/spell it cast
+-- (uses = casts) or landed (hits). Max heal: what it healed with it.
+CREATE TABLE IF NOT EXISTS npc_ability_facts (
+    game_id INTEGER NOT NULL REFERENCES games(id),
+    npc TEXT COLLATE NOCASE NOT NULL,
+    base_zone TEXT COLLATE NOCASE NOT NULL,
+    tier INTEGER NOT NULL,
+    solo INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    name TEXT COLLATE NOCASE NOT NULL,
+    uses INTEGER NOT NULL DEFAULT 0,
+    hits INTEGER NOT NULL DEFAULT 0,
+    max_hit INTEGER NULL,
+    max_heal INTEGER NULL,
+    PRIMARY KEY (game_id, npc, base_zone, tier, solo, kind, name)
+);
+
 -- What a vendor sells: each distinct item x quantity x price you've bought
 -- from them (price_text '' when the line had none).
 CREATE TABLE IF NOT EXISTS vendor_catalog_facts (
@@ -284,9 +302,7 @@ CREATE INDEX IF NOT EXISTS idx_ts ON events (ts);
 -- grouped by log_source_id just to populate a dropdown -- this makes that an
 -- index-only aggregate per log source instead of a table scan.
 CREATE INDEX IF NOT EXISTS idx_log_source_ts ON events (log_source_id, ts);
-CREATE INDEX IF NOT EXISTS idx_log_source_line ON raw_lines (log_source_id, line_no);
 -- backfill.py's `WHERE event_id IS NULL` depends on this one.
-CREATE INDEX IF NOT EXISTS idx_raw_lines_event ON raw_lines (event_id);
 CREATE INDEX IF NOT EXISTS idx_rule_ts ON alert_log (rule_id, ts);
 CREATE INDEX IF NOT EXISTS idx_alert_log_event ON alert_log (event_id);
 CREATE INDEX IF NOT EXISTS idx_alert_rules_game ON alert_rules (game_id);

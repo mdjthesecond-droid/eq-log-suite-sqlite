@@ -17,7 +17,7 @@ LOGS.mkdir()
 os.environ["EQ_LOG_SUITE_CONFIG"] = str(TMP / "config.yaml")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from eq_log_suite import live_window as lw  # noqa: E402
+from eq_log_suite import ingest, live_window as lw  # noqa: E402
 from eq_log_suite.parsers.eq_legends import EQLegendsParser  # noqa: E402
 
 FMT = "%a %b %d %H:%M:%S %Y"
@@ -149,15 +149,29 @@ def test_launch_starts_empty_last_log_only_preselected():
     assert lw.last_selected() == str(log)        # ...just remembered for the dropdown
 
 
+# Raw lines aren't stored, so count what the importer hands the database
+# to record for the character (insert_batch's lines).
+_RECORDED = []   # character_id per recorded line
+_insert_batch = ingest.insert_batch
+
+
+def _capture(conn, game_id, character_id, log_source_id, events_batch, raw_batch, facts=None):
+    _RECORDED.extend(character_id for _ in raw_batch)
+    return _insert_batch(conn, game_id, character_id, log_source_id, events_batch, raw_batch, facts=facts)
+
+
+ingest.insert_batch = _capture
+
+
 def _kb_lines(path):
     conn = lw.db.get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) n FROM raw_lines r JOIN log_sources ls ON ls.id=r.log_source_id "
-                        "JOIN characters c ON c.id=ls.character_id WHERE c.name=%s", ("Recorder",))
-            return cur.fetchone()["n"]
+            cur.execute("SELECT id FROM characters WHERE name=%s", ("Recorder",))
+            ids = {r["id"] for r in cur.fetchall()}
     finally:
         conn.close()
+    return sum(1 for cid in _RECORDED if cid in ids)
 
 
 def test_selecting_records_into_database_once():

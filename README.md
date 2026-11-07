@@ -182,34 +182,47 @@ away and a new one starts under the same name, the app tells them apart by
 their first line and reads the new one from the start -- nothing skipped,
 nothing recorded twice.
 
-## What's kept: the knowledge base
+## What's kept: knowledge and history -- not combat
 
-Besides the recorded lines, every line that gets recorded (never just
-viewed) also updates lasting facts (`eq_log_suite/facts.py`), per mob x
-zone x tier:
+The log files are the permanent record. The database keeps only what's
+been chosen to keep from them (`eq_log_suite/facts.py`), built from every
+line that gets recorded (never just viewed). Combat lines and raw lines
+aren't stored at all: the Live view (`/live`, `/encounters`, Browse Events)
+re-reads them from the selected log.
+
+**Knowledge, per mob x zone x tier:**
 
 - **Kills** -- every death seen, and **your kills**: the killing blow was
   yours, *or* you traded hits with it in the minute before it died, *or*
   you looted its corpse, *or* a group member killed it while you were
   grouped. Encounter locking makes all of those your kill -- you see the
   loot -- so they're what `/loot`'s drop chance is measured against.
-- **Loot** -- drops and quantity per item.
+- **Loot** -- drops and quantity per item; **ground spawns**; what
+  **vendors** sell.
 - **Level range and rare flag**, from cons; **HP only for rare mobs** (one
   is up at a time, so the damage it took until it died is its HP; reads low
-  if others' damage is missing from your log).
+  if others' damage is missing from your log). A mob counts as rare once a
+  con has said so.
+- **Attacks and spells** -- each melee attack with its max hit, each
+  skill/spell it cast or landed with its max hit / max heal.
 - **Where it's been seen**, and NPCs you only talked to or traded with.
 
-`/loot` and `/npcs` read these facts. If a database recorded lines before
-the facts existed, or after the parser learned new lines, run once (stop
-the app first):
+**History, per character:**
+
+- **Zone visits** (`/zones`) -- each visit summarized: when you left, your
+  damage, DPS, hit and crit rate, and kills there.
+- **Dialogue, quests, tasks** -- every hail, say, NPC line, reward,
+  turn-in, quest and task line, plus kills, loot, zone changes and group
+  changes (what those pages and "your kills" need).
+
+After the parser learns new lines or a new fact is added, rebuild
+everything from the recorded log files (stop the app first; it backs the
+database up to `data/backups/` before starting, and refuses if a recorded
+log has been moved or deleted):
 
 ```bash
-.venv/bin/python -m eq_log_suite.backfill --all   # re-read lines the parser didn't know
-.venv/bin/python -m eq_log_suite.facts            # rebuild every fact from recorded lines
+.venv/bin/python -m eq_log_suite.facts
 ```
-
-`tools/verify_facts.py` checks the facts against the pages' original
-calculations on any database (read-only).
 
 ## Extending to a new game
 
@@ -219,7 +232,8 @@ calculations on any database (read-only).
    `PATTERNS` -- an ordered list of `(regex, handler)` pairs. Look at
    `eq_legends.py` and `eq.py` for the pattern: scan the real log for
    distinct line shapes, write a regex + handler per shape, and don't worry
-   about 100% coverage -- unmatched lines still land in `raw_lines`.
+   about 100% coverage -- an unmatched line is just skipped (it's still in the
+   log file, so a rebuild picks it up once a pattern exists).
 3. Register it in `eq_log_suite/parsers/registry.py`.
 4. Everything else (schema, importer, tailer, web UI, overlay, alerts) works
    unchanged.

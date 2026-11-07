@@ -25,17 +25,24 @@ def normalize_names(event):
 
 def insert_batch(conn, game_id, character_id, log_source_id, events_batch, raw_batch, facts=None):
     """events_batch: list of (idx, ParsedEvent).
-    raw_batch: list of (idx, line_no, ts, raw_text) -- one entry per line read,
-    whether or not it parsed into an event.
+    raw_batch: list of (idx, line_no, ts, raw_text) -- one entry per line
+    being recorded, whether or not it parsed into an event. Only checked
+    for emptiness: raw lines aren't stored (the log file is the record).
 
-    Sets `.db_id` on each ParsedEvent in events_batch to its inserted row id.
+    Every event goes to the knowledge base (facts.observe) first -- which
+    can add to it (a zone change's cast_s_before) -- then only history
+    (facts.HISTORY_TYPES) is stored. Sets `.db_id` on each stored event.
     """
+    from eq_log_suite.facts import HISTORY_TYPES
     if not raw_batch:
         return
     with conn.cursor() as cur:
-        event_id_by_idx = {}
         for idx, event in events_batch:
             normalize_names(event)
+            if facts is not None:
+                facts.observe(event)
+            if event.event_type not in HISTORY_TYPES:
+                continue
             cur.execute(
                 "INSERT INTO events (game_id, character_id, log_source_id, ts, event_type, "
                 "source_name, source_type, target_name, target_type, verb, amount, outcome, "
@@ -49,15 +56,6 @@ def insert_batch(conn, game_id, character_id, log_source_id, events_batch, raw_b
                 ),
             )
             event.db_id = cur.lastrowid
-            event_id_by_idx[idx] = cur.lastrowid
-            if facts is not None:
-                facts.observe(event)
-        for idx, line_no, ts, raw_text in raw_batch:
-            cur.execute(
-                "INSERT INTO raw_lines (log_source_id, line_no, ts, raw_text, event_id) "
-                "VALUES (%s,%s,%s,%s,%s)",
-                (log_source_id, line_no, ts, raw_text, event_id_by_idx.get(idx)),
-            )
     if facts is not None:
         facts.flush()  # same transaction as the lines they came from
     conn.commit()

@@ -64,7 +64,7 @@ does NOT produce N task_updated lines -- every "--You have looted 2/3/4/5
 qty-1 loot.
 
 Also seen in that sample but not yet parsed into an event (harmless --
-falls through to raw_lines, not lost): "You have gained a level! Welcome to
+it's still in the log file): "You have gained a level! Welcome to
 level N!".
 """
 
