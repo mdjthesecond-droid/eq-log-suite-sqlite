@@ -24,7 +24,7 @@ import webbrowser
 
 HOST = "127.0.0.1"
 PORT = 8000
-START_PAGE = "/encounters"
+START_PAGE = "/live"
 TITLE = "EQ Log Suite"
 
 

@@ -90,7 +90,7 @@ _started = False
 
 
 def live_path() -> Path:
-    return db.sqlite_path().with_name("live.sqlite3")
+    return db.main_path().with_name("live.sqlite3")
 
 
 def _raw():
@@ -351,6 +351,9 @@ def select(path: str, window: str, character: str | None = None, server: str | N
     over `window`, and make it the log being followed. Raises ValueError for
     an unknown window or a file that can't be read or identified."""
     global _started
+    from eq_log_suite import maintenance
+    if maintenance.rebuilding():
+        raise ValueError("The database is being rebuilt -- select the log once that's finished (Database page).")
     if window not in WINDOWS:
         raise ValueError(f"unknown window {window!r}")
     path = str(Path(path).expanduser())

@@ -26,7 +26,7 @@ _service_lock = threading.Lock()
 
 
 def lock_path() -> Path:
-    return db.sqlite_path().with_name("tailer.lock")
+    return db.main_path().with_name("tailer.lock")
 
 
 class TailLock:
@@ -148,6 +148,15 @@ class TailerService:
             raise RuntimeError(f"{path} hasn't been recorded yet -- select it in the picker first")
         asyncio.run_coroutine_threadsafe(self._follow(log_source), self.loop).result(30)
         self.error = None
+
+    def pause(self) -> str | None:
+        """Stops following (e.g. while the database is being rebuilt).
+        Returns the path that was being followed, to follow() again after."""
+        if not (self.loop and self.task):
+            return None
+        path = self.following
+        asyncio.run_coroutine_threadsafe(self._stop_current(), self.loop).result(30)
+        return path
 
     def status(self) -> dict:
         alive = bool(self.task and not self.task.done())

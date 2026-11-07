@@ -3352,40 +3352,89 @@ def alerts_delete(rule_id: int):
     return RedirectResponse("/alerts", status_code=303)
 
 
-@app.get("/import", response_class=HTMLResponse)
-def import_form(request: Request):
+@app.get("/import")
+def import_form():
+    return RedirectResponse("/database", status_code=303)
+
+
+def _database_context(request: Request, folder: str = "", message: str = "", error: str = "") -> dict:
+    from eq_log_suite import facts, maintenance
     conn = db.get_connection()
     try:
+        recorded = facts.recorded_logs(conn)
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM log_sources")
-            sources = cur.fetchall()
+            cur.execute("SELECT log_source_id, MIN(start_ts) AS first, MAX(end_ts) AS last FROM recorded_ranges "
+                        "GROUP BY log_source_id")
+            spans = {r["log_source_id"]: r for r in cur.fetchall()}
     finally:
         conn.close()
-    return templates.TemplateResponse(request, "import.html", {"sources": sources, "result": None})
+    for r in recorded:
+        r["exists"] = os.path.isfile(r["file_path"])
+        span = spans.get(r["id"]) or {}
+        r["first"], r["last"] = span.get("first"), span.get("last")
+    listing = live_window.browse(folder or None)
+    recorded_paths = {r["file_path"] for r in recorded}
+    for l in listing["logs"]:
+        l["recorded"] = l["path"] in recorded_paths
+    svc = tailer_service.current()
+    return {
+        "recorded": recorded, "listing": listing, "archives": maintenance.list_archives(),
+        "archive_dir": str(maintenance.archive_dir()), "job": maintenance.status(),
+        "following": svc.following if svc else None, "games": sorted(db.enabled_games()) or ["eql"],
+        "message": message, "error": error,
+    }
 
 
-@app.post("/import", response_class=HTMLResponse)
-def import_run(
-    request: Request, path: str = Form(...), game: str = Form("auto"),
-    character: str = Form(""), server: str = Form(""),
-):
-    import subprocess
+@app.get("/database", response_class=HTMLResponse)
+def database_page(request: Request, folder: str = "", message: str = "", error: str = ""):
+    return templates.TemplateResponse(request, "database.html", _database_context(request, folder, message, error))
 
-    cmd = [sys.executable, "-m", "eq_log_suite.importer", path, "--game", game]
-    if character:
-        cmd += ["--character", character]
-    if server:
-        cmd += ["--server", server]
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(PROJECT_ROOT))
 
-    conn = db.get_connection()
+@app.get("/api/database/status")
+def database_status():
+    from eq_log_suite import maintenance
+    return JSONResponse(maintenance.status())
+
+
+def _start_job(kind, folder="", **kwargs):
+    from eq_log_suite import maintenance
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM log_sources")
-            sources = cur.fetchall()
-    finally:
-        conn.close()
-    return templates.TemplateResponse(request, "import.html", {
-        "sources": sources,
-        "result": {"stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode},
-    })
+        maintenance.start(kind, **kwargs)
+    except (RuntimeError, ValueError) as e:
+        return RedirectResponse(f"/database?folder={quote(folder)}&error={quote(str(e))}", status_code=303)
+    return RedirectResponse(f"/database?folder={quote(folder)}", status_code=303)
+
+
+@app.post("/database/add")
+async def database_add(request: Request):
+    form = await request.form()
+    folder = form.get("folder", "")
+    game = form.get("game") or None
+    items = [{"path": p, "game": game, "character": form.get(f"character:{p}") or None,
+              "server": form.get(f"server:{p}") or None} for p in form.getlist("path")]
+    items += [{"path": p.strip(), "game": game} for p in (form.get("other_paths") or "").splitlines() if p.strip()]
+    if not items:
+        return RedirectResponse(f"/database?folder={quote(folder)}&error={quote('Tick at least one file.')}",
+                                status_code=303)
+    return _start_job("add", folder, items=items)
+
+
+@app.post("/database/rebuild")
+async def database_rebuild(request: Request):
+    form = await request.form()
+    logs = form.getlist("log")
+    if not logs:
+        return RedirectResponse("/database?error=" + quote("Tick at least one log to rebuild from."), status_code=303)
+    if form.get("confirm") != "yes":
+        return RedirectResponse("/database?error=" + quote("Tick the confirmation box to rebuild."), status_code=303)
+    archive_first = None
+    if form.get("archive_first"):
+        archive_first = {"name": form.get("archive_name", ""), "note": form.get("archive_note", ""),
+                         "folder": form.get("archive_folder", "")}
+    return _start_job("rebuild", logs=logs, archive_first=archive_first,
+                      reset_settings=bool(form.get("reset_settings")))
+
+
+@app.post("/database/archive")
+def database_archive(name: str = Form(""), note: str = Form(""), folder: str = Form("")):
+    return _start_job("archive", name=name, note=note, folder=folder)

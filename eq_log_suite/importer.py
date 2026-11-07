@@ -50,8 +50,7 @@ def import_file(path: str, game_code: str | None, character_name: str | None, se
     if game_code is None or game_code == "auto":
         parser_cls = game_for_log(path)
         if parser_cls is None:
-            print(f"Could not auto-detect game for {path}; pass --game explicitly.", file=sys.stderr)
-            sys.exit(1)
+            raise ValueError(f"Can't tell which game {path} is from -- pass the game explicitly.")
     else:
         parser_cls = get_parser(game_code)
 
@@ -144,6 +143,8 @@ def import_file(path: str, game_code: str | None, character_name: str | None, se
     if skipped_count:
         print(f"  {skipped_count} line(s) skipped as already recorded (e.g. this is a copy of a log that was already read).")
     print(f"Imported {path}: {total_count} new lines read, {parsed_count} parsed into events (resumed from byte offset {start_offset}).")
+    return {"path": path, "game": parser_cls.game_code, "character": character_name, "server": server,
+            "lines": total_count, "parsed": parsed_count, "skipped": skipped_count, "from_offset": start_offset}
 
 
 def main():
@@ -153,7 +154,11 @@ def main():
     ap.add_argument("--character", default=None)
     ap.add_argument("--server", default=None)
     args = ap.parse_args()
-    import_file(args.path, args.game, args.character, args.server)
+    try:
+        import_file(args.path, args.game, args.character, args.server)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

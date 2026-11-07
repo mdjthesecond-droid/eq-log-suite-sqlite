@@ -499,7 +499,7 @@ def backup(conn, verbose=True):
     """Copies the database to data/backups/<name>-<time>.sqlite3 first."""
     from datetime import datetime
     from eq_log_suite import db
-    src = db.sqlite_path()
+    src = db.main_path()
     dest = src.parent / "backups" / f"{src.stem}-{datetime.now():%Y%m%d-%H%M%S}.sqlite3"
     dest.parent.mkdir(parents=True, exist_ok=True)
     import sqlite3
@@ -513,30 +513,46 @@ def backup(conn, verbose=True):
     return dest
 
 
-def rebuild(conn, verbose=True):
-    """Re-reads every recorded log file from the start with the current
-    parser, replacing all facts and history -- for after a change to what's
-    extracted. The log files are the permanent record (combat lines aren't
-    stored), so every one has to still exist; nothing is touched if one
-    doesn't. Backs the database up first. Keeps everything you entered
-    (alert rules, NPC/zone notes and overrides, settings). Run it with the
-    app stopped."""
-    import os
-    from eq_log_suite.importer import import_file
+def recorded_logs(conn) -> list[dict]:
+    """Every log file that has had lines recorded from it, with whose it is
+    (a log selected once but never read has nothing to redo)."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT ls.id, ls.file_path, g.code AS game, c.name, c.server FROM log_sources ls "
-            "JOIN games g ON g.id=ls.game_id JOIN characters c ON c.id=ls.character_id"
+            "JOIN games g ON g.id=ls.game_id JOIN characters c ON c.id=ls.character_id "
+            "WHERE ls.id IN (SELECT DISTINCT log_source_id FROM recorded_ranges) ORDER BY ls.file_path"
         )
-        sources = cur.fetchall()
-        cur.execute("SELECT DISTINCT log_source_id FROM recorded_ranges")
-        recorded = {r["log_source_id"] for r in cur.fetchall()}
-    sources = [s for s in sources if s["id"] in recorded]   # selected once but never read: nothing to redo
-    missing = [s["file_path"] for s in sources if not os.path.isfile(s["file_path"])]
+        return cur.fetchall()
+
+
+def rebuild(conn, verbose=True, logs=None, backup_first=True, progress=None):
+    """Re-reads log files from the start with the current parser, replacing
+    all facts and history -- for after a change to what's extracted.
+
+    logs: which files -- None for every recorded log; otherwise a list of
+    paths or {"path", "game", "name", "server"} dicts (a file not recorded
+    before is added; its identity is guessed from the name unless given).
+    The log files are the permanent record (combat lines aren't stored), so
+    every one has to still exist; nothing is touched (ValueError) if one
+    doesn't. Backs the database up first unless backup_first=False. Keeps
+    everything you entered (alert rules, NPC/zone notes and overrides,
+    settings). Run it with recording stopped (the app does that itself --
+    maintenance.py). Returns each file's import summary."""
+    import os
+    from eq_log_suite.importer import import_file
+    known = {s["file_path"]: s for s in recorded_logs(conn)}
+    chosen = []
+    for item in (list(known) if logs is None else logs):
+        if isinstance(item, dict):
+            chosen.append({**known.get(item["path"], {}), **{k: v for k, v in item.items() if v}, "file_path": item["path"]})
+        else:
+            chosen.append(known.get(item) or {"file_path": item})
+    missing = [c["file_path"] for c in chosen if not os.path.isfile(c["file_path"])]
     if missing:
-        raise SystemExit("Not rebuilding -- these recorded logs no longer exist (move them back first):\n  "
+        raise ValueError("Not rebuilding -- these logs no longer exist (move them back first):\n  "
                          + "\n  ".join(missing))
-    backup(conn, verbose)
+    if backup_first:
+        backup(conn, verbose)
     with conn.cursor() as cur:
         cur.execute("UPDATE alert_log SET event_id=NULL")
         cur.execute("DROP TABLE IF EXISTS raw_lines")   # no longer kept at all
@@ -544,11 +560,16 @@ def rebuild(conn, verbose=True):
             cur.execute(f"DELETE FROM {t}")
         cur.execute("UPDATE log_sources SET last_byte_offset=0, fingerprint=NULL")
     conn.commit()
-    for src in sorted(sources, key=lambda s: (_first_ts(s["file_path"]) is None, _first_ts(s["file_path"]) or 0)):
+    results = []
+    order = sorted(chosen, key=lambda c: (_first_ts(c["file_path"]) is None, _first_ts(c["file_path"]) or 0))
+    for n, src in enumerate(order, 1):
         if verbose:
             print(f"  reading {src['file_path']}")
-        import_file(src["file_path"], src["game"], src["name"], src["server"])
+        if progress:
+            progress(f"Reading {os.path.basename(src['file_path'])} ({n} of {len(order)})")
+        results.append(import_file(src["file_path"], src.get("game"), src.get("name"), src.get("server")))
     conn.raw.execute("VACUUM")
+    return results
 
 
 if __name__ == "__main__":
@@ -557,5 +578,7 @@ if __name__ == "__main__":
     try:
         print("Rebuilding facts and history from the recorded log files...")
         rebuild(c)
+    except ValueError as e:
+        raise SystemExit(str(e))
     finally:
         c.close()

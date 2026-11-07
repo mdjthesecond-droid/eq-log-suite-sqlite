@@ -13,8 +13,10 @@ The config file itself can be pointed elsewhere with EQ_LOG_SUITE_CONFIG
 (handy for a throwaway test database).
 """
 
+import contextlib
 import functools
 import os
+import threading
 from pathlib import Path
 
 import yaml
@@ -95,9 +97,32 @@ def enabled_log_roots() -> dict[str, str]:
     return {code: path for code, path in roots.items() if code in enabled}
 
 
-def sqlite_path() -> Path:
+_thread = threading.local()
+
+
+def main_path() -> Path:
+    """The database file the app uses (config's database.path)."""
     p = Path((config().get("database") or {}).get("path") or "data/eqlogs.sqlite3").expanduser()
     return p if p.is_absolute() else DATA_ROOT / p
+
+
+def sqlite_path() -> Path:
+    """The database this thread works on: main_path(), unless the thread is
+    inside using_database() -- how a rebuild records into a copy on the side
+    while the tailer and every page keep using the real one."""
+    return getattr(_thread, "path", None) or main_path()
+
+
+@contextlib.contextmanager
+def using_database(path):
+    """Within this block, on this thread only, get_connection() (and so the
+    importer, facts and coverage) works on `path` instead of the main file."""
+    previous = getattr(_thread, "path", None)
+    _thread.path = Path(path)
+    try:
+        yield
+    finally:
+        _thread.path = previous
 
 
 def apply_schema(raw_conn, include_indexes: bool = True):
@@ -139,11 +164,11 @@ _ADDED_COLUMNS = [
 
 
 @functools.lru_cache
-def _ensure_schema():
-    # Once per process: a brand-new install (or a shared copy someone just
-    # unzipped) gets its tables created on first use, no setup step needed.
+def _ensure_schema(path_str: str):
+    # Once per process per file: a brand-new install (or a shared copy someone
+    # just unzipped) gets its tables created on first use, no setup step needed.
     from eq_log_suite import sqlite_compat
-    path = sqlite_path()
+    path = Path(path_str)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite_compat.Connection(str(path))
     try:
@@ -157,8 +182,9 @@ def get_connection():
     done. Opening one is cheap (a local file: no network, no auth), so each
     call just opens the database file."""
     from eq_log_suite import sqlite_compat
-    _ensure_schema()
-    return sqlite_compat.Connection(str(sqlite_path()))
+    path = str(sqlite_path())
+    _ensure_schema(path)
+    return sqlite_compat.Connection(path)
 
 
 def get_setting(key: str, default=None):

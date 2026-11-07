@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block title %}Add / Rebuild / Archive{% endblock %}
+{% block content %}
+<h1>Add / Rebuild / Archive</h1>
+<p style="opacity:0.8;">The database keeps knowledge and history from every log recorded -- not the
+logs themselves, which stay the permanent record. These are the ways to change what it holds.</p>
+
+{% if error %}<p style="border:1px solid #c0392b; border-radius:6px; padding:0.6rem 0.9rem;">&#9888; {{ error }}</p>{% endif %}
+{% if message %}<p style="border:1px solid #2e8b57; border-radius:6px; padding:0.6rem 0.9rem;">{{ message }}</p>{% endif %}
+
+<div id="job" style="border:1px solid #888; border-radius:6px; padding:0.6rem 0.9rem; margin-bottom:1rem;{% if not job.kind %} display:none;{% endif %}">
+  <strong id="job-title">{% if job.running %}Working: {{ job.kind }}{% elif job.kind %}Last action: {{ job.kind }}{% endif %}</strong>
+  <span id="job-step" style="opacity:0.8;">{{ job.step or '' }}</span>
+  <details style="margin-top:0.3rem;"><summary>details</summary><pre id="job-log" style="white-space:pre-wrap; margin:0.3rem 0 0;">{{ (job.log or [])|join('\n') }}</pre></details>
+</div>
+
+<h2>Add files</h2>
+<p style="opacity:0.8;">Records log files into the database without opening them in the Live view -- rotated
+<code>.txt.&lt;date&gt;</code> copies, old or archived logs, a friend's raid log. Anything already recorded is
+skipped, whatever the file is called now. The log being recorded live is skipped too (it's already
+being recorded). To view and follow a log, select it in the picker on <a href="/encounters">Encounters</a>.</p>
+
+<form method="get" action="/database" style="display:flex; gap:0.5rem; align-items:center; margin-bottom:0.5rem;">
+  <span>Folder:</span>
+  <input name="folder" value="{{ listing.dir }}" style="width:520px;">
+  <button type="submit">Show</button>
+  {% if listing.parent %}<a href="/database?folder={{ listing.parent|urlencode }}">&uarr; up</a>{% endif %}
+</form>
+{% if listing.error %}<p>&#9888; {{ listing.error }}</p>{% endif %}
+{% if listing.dirs %}
+<p style="margin:0.3rem 0;">{% for d in listing.dirs %}<a href="/database?folder={{ d|urlencode }}">{{ d.replace('\\', '/').rsplit('/', 1)[-1] }}/</a>{% if not loop.last %} &middot; {% endif %}{% endfor %}</p>
+{% endif %}
+
+<form method="post" action="/database/add">
+  <input type="hidden" name="folder" value="{{ listing.dir }}">
+  {% if listing.logs %}
+  <div class="scroll-frame">
+  <table class="sortable">
+    <thead><tr><th><input type="checkbox" onclick="document.querySelectorAll('input[name=path]').forEach(c => { if (!c.disabled) c.checked = this.checked; })"></th>
+      <th>file</th><th>character</th><th>server</th><th>size</th><th>modified</th><th>status</th></tr></thead>
+    <tbody>
+      {% for l in listing.logs %}
+      {% set live = following and l.path == following %}
+      <tr>
+        <td><input type="checkbox" name="path" value="{{ l.path }}"{% if live %} disabled{% endif %}></td>
+        <td>{{ l.name }}</td>
+        <td><input name="character:{{ l.path }}" value="{{ l.character or '' }}" style="width:110px;"{% if l.identity_known %} readonly title="already recorded as this"{% endif %}></td>
+        <td><input name="server:{{ l.path }}" value="{{ l.server or '' }}" style="width:110px;"{% if l.identity_known %} readonly title="already recorded as this"{% endif %}></td>
+        <td>{{ (l.size / 1e6)|round(1) }} MB</td>
+        <td>{{ l.mtime.strftime('%Y-%m-%d %H:%M') }}</td>
+        <td>{% if live %}recording live{% elif l.recorded %}recorded (adds only what's new){% else %}not recorded{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p style="opacity:0.7;">No log files in this folder.</p>
+  {% endif %}
+  <p style="margin:0.5rem 0 0.2rem;">Or any other files, one path per line:</p>
+  <textarea name="other_paths" rows="2" style="width:620px;"></textarea>
+  <p>
+    Game: <select name="game">{% for g in games %}<option value="{{ g }}">{{ g }}</option>{% endfor %}<option value="">detect from the file</option></select>
+    <span style="opacity:0.7;">(a file already recorded keeps its game)</span>
+    <button type="submit"{% if job.running %} disabled{% endif %}>Add ticked files</button>
+  </p>
+</form>
+
+<h2>Rebuild</h2>
+<p style="opacity:0.8;">Re-reads the ticked logs from the start with the current parser and replaces all knowledge
+and history with what they give -- after a parser fix or a new fact, or to drop logs you don't want counted.
+It's built on a copy off to the side and swapped in only once it's finished, so if anything goes wrong
+(or a file is missing) nothing changes. Recording pauses meanwhile and catches up after; the Live view keeps
+working. Kept: alert rules, NPC/zone notes and overrides, rotation settings, log folders and the picker
+-- unless you reset settings too.</p>
+
+<form method="post" action="/database/rebuild">
+  <div class="scroll-frame">
+  <table class="sortable">
+    <thead><tr><th><input type="checkbox" checked onclick="document.querySelectorAll('input[name=log]').forEach(c => { if (!c.disabled) c.checked = this.checked; })"></th>
+      <th>recorded log</th><th>character</th><th>game</th><th>lines from</th><th>to</th><th>file</th></tr></thead>
+    <tbody>
+      {% for r in recorded %}
+      <tr>
+        <td><input type="checkbox" name="log" value="{{ r.file_path }}" checked{% if not r.exists %} disabled{% endif %}></td>
+        <td>{{ r.file_path }}{% if following and r.file_path == following %} <strong>(recording live -- always included)</strong>{% endif %}</td>
+        <td>{{ r.name }}{% if r.server %} ({{ r.server }}){% endif %}</td>
+        <td>{{ r.game }}</td>
+        <td>{{ r.first or '' }}</td>
+        <td>{{ r.last or '' }}</td>
+        <td>{% if r.exists %}found{% else %}<strong>missing</strong> -- can't be rebuilt{% endif %}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" style="opacity:0.7;">Nothing recorded yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p style="margin-top:0.6rem;"><label><input type="checkbox" name="archive_first" value="1" checked
+     onchange="document.getElementById('archive-fields').style.display = this.checked ? '' : 'none'"> Archive the current database first</label></p>
+  <p id="archive-fields" style="margin-left:1.5rem;">
+    <input name="archive_name" placeholder="name (default: date and time)" style="width:240px;">
+    <input name="archive_note" placeholder="note, e.g. before the claw fix" style="width:280px;">
+    <input name="archive_folder" placeholder="{{ archive_dir }}" style="width:300px;">
+  </p>
+  <p><label><input type="checkbox" name="reset_settings" value="1"> Reset settings too (alert rules, notes, overrides, log folders, picker)</label></p>
+  <p><label><input type="checkbox" name="confirm" value="yes"> Yes, replace the database's knowledge and history with what these logs give</label>
+     <button type="submit"{% if job.running or not recorded %} disabled{% endif %}>Rebuild</button></p>
+</form>
+
+<h2>Archive</h2>
+<p style="opacity:0.8;">A full copy of the database as it is now, with a note of what's in it -- to keep before a big
+change, or to set a season aside. Archives are listed here wherever they're saved.</p>
+<form method="post" action="/database/archive" style="display:flex; gap:0.5rem; align-items:center;">
+  <input name="name" placeholder="name (default: date and time)" style="width:240px;">
+  <input name="note" placeholder="note" style="width:280px;">
+  <input name="folder" placeholder="{{ archive_dir }}" style="width:300px;">
+  <button type="submit"{% if job.running %} disabled{% endif %}>Archive now</button>
+</form>
+{% if archives %}
+<div class="scroll-frame" style="margin-top:0.6rem;">
+<table class="sortable">
+  <thead><tr><th>made</th><th>name</th><th>note</th><th>lines from</th><th>to</th><th>characters</th><th>logs</th><th>size</th><th>file</th></tr></thead>
+  <tbody>
+    {% for a in archives %}
+    <tr>
+      <td>{{ a.made_at }}</td>
+      <td>{{ a.name }}</td>
+      <td>{{ a.note or '' }}</td>
+      <td>{{ a.info.first_line or '' }}</td>
+      <td>{{ a.info.last_line or '' }}</td>
+      <td>{{ (a.info.characters or [])|join(', ') }}</td>
+      <td>{{ (a.info.source_logs or [])|length }}</td>
+      <td>{% if a.exists %}{{ a.size_mb }} MB{% endif %}</td>
+      <td>{% if a.exists %}{{ a.file }}{% else %}<strong>missing</strong> ({{ a.file }}){% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<p style="opacity:0.7;">No archives yet.</p>
+{% endif %}
+
+<script>
+  // While an action runs, follow its progress; reload when it finishes.
+  (function () {
+    let wasRunning = {{ 'true' if job.running else 'false' }};
+    async function tick() {
+      const s = await (await fetch("/api/database/status")).json();
+      if (!s.kind) return;
+      document.getElementById("job").style.display = "";
+      document.getElementById("job-title").textContent = (s.running ? "Working: " : "Last action: ") + s.kind;
+      document.getElementById("job-step").textContent = s.error ? s.error : (s.step || "");
+      document.getElementById("job-log").textContent = (s.log || []).join("\n");
+      if (wasRunning && !s.running) { location.reload(); return; }
+      wasRunning = s.running;
+    }
+    if (wasRunning) setInterval(tick, 1000);
+  })();
+</script>
+{% endblock %}

@@ -220,10 +220,31 @@ re-reads them from the selected log.
   turn-in, quest and task line, plus kills, loot, zone changes and group
   changes (what those pages and "your kills" need).
 
-After the parser learns new lines or a new fact is added, rebuild
-everything from the recorded log files (stop the app first; it backs the
-database up to `data/backups/` before starting, and refuses if a recorded
-log has been moved or deleted):
+### Add files, Rebuild, Archive
+
+The **Add / Rebuild / Archive** page (`/database`, in the nav) changes what
+the database holds:
+
+- **Add files** -- record log files without opening them in the Live view:
+  rotated `.txt.<date>` copies, old or archived logs, a friend's raid log.
+  Pick a folder, tick files (character/server editable for ones not
+  recorded yet). Anything already recorded is skipped, whatever the file is
+  called now.
+- **Rebuild** -- re-read the ticked logs with the current parser and replace
+  all knowledge and history with what they give: after a parser fix or a new
+  fact, or to drop logs you don't want counted. It's built on a copy off to
+  the side and swapped in only when finished, so a failure or a missing file
+  changes nothing. Recording pauses and catches up after (nothing written
+  meanwhile is lost); the Live view keeps working. Your alert rules, NPC/zone
+  notes and overrides, rotation settings, log folders and picker are kept
+  unless you tick "reset settings too". "Archive first" is on by default.
+- **Archive** -- a full copy of the database, with a note and a summary of
+  what's in it (logs, date range, characters, row counts) inside it, saved
+  to `data/archive/` (or a folder you choose) and listed on the page.
+
+The same rebuild from the command line (app stopped; backs up to
+`data/backups/` first; every recorded log, and refuses if one has been moved
+or deleted):
 
 ```bash
 .venv/bin/python -m eq_log_suite.facts
