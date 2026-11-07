@@ -165,7 +165,7 @@ def test_group_kills_count_while_grouped():
         conn.close()
 
 
-def test_fought_and_ground_spawns():
+def test_fought_ground_spawns_and_vendor_catalog():
     # Lines from a real Kerra Isle log (2026-11-07); "You picked up" is the
     # parser's confirmed-real ground spawn form.
     d = TMP / "kerra"
@@ -178,23 +178,30 @@ def test_fought_and_ground_spawns():
         L(3, "You slash a kerran puma for 12 points of damage."),
         L(4, "You picked up Gloomingdeep Mushrooms."),
         L(5, "You picked up Gloomingdeep Mushrooms."),
+        L(6, "You purchased 100 Water Flask from Innkeep Evelona for  1 platinum."),   # real (2026-09-11)
+        L(7, "You purchased 100 Water Flask from Innkeep Evelona for  1 platinum."),
     ]), newline="")
     import_file(str(log), "eql", None, None)
     assert mob("Mabel", "Kerra Isle")["fought"] == 0           # quest-giver: conned, never fought
     assert mob("a kerran puma", "Kerra Isle")["fought"] == 1
     ground = [(r["base_zone"], r["item"], r["times"]) for r in facts_rows("ground_spawn_facts", "base_zone, item, times")]
     assert ground == [("Kerra Isle", "Gloomingdeep Mushrooms", 2)], ground
+    catalog = [(r["npc"], r["item"], r["qty"], r["price_text"], r["times"])
+               for r in facts_rows("vendor_catalog_facts", "npc, item, qty, price_text, times")]
+    assert catalog == [("Innkeep Evelona", "Water Flask", 100, "1 platinum", 2)], catalog
 
 
 def test_copy_of_same_log_adds_no_facts():
     before = ([dict(r) for r in facts_rows("mob_facts")], [dict(r) for r in facts_rows("loot_facts")],
-              [dict(r) for r in facts_rows("ground_spawn_facts")])
+              [dict(r) for r in facts_rows("ground_spawn_facts")],
+              [dict(r) for r in facts_rows("vendor_catalog_facts")])
     visits_before = len(facts_rows("zone_visits"))
     copy = TMP / "one" / "eqlog_Alpha_s1.txt.archived"
     shutil.copy(TMP / "one" / "eqlog_Alpha_s1.txt", copy)
     import_file(str(copy), "eql", None, None)
     after = ([dict(r) for r in facts_rows("mob_facts")], [dict(r) for r in facts_rows("loot_facts")],
-             [dict(r) for r in facts_rows("ground_spawn_facts")])
+             [dict(r) for r in facts_rows("ground_spawn_facts")],
+             [dict(r) for r in facts_rows("vendor_catalog_facts")])
     assert before == after
     assert len(facts_rows("zone_visits")) == visits_before
 
@@ -202,6 +209,7 @@ def test_copy_of_same_log_adds_no_facts():
 def test_rebuild_from_events_matches_incremental():
     incremental = ([dict(r) for r in facts_rows("mob_facts")], [dict(r) for r in facts_rows("loot_facts")],
                    [dict(r) for r in facts_rows("ground_spawn_facts")],
+                   [dict(r) for r in facts_rows("vendor_catalog_facts")],
                    [(r["zone_name"], r["ts"]) for r in facts_rows("zone_visits", "zone_name, ts")])
     conn = db.get_connection()
     try:
@@ -210,6 +218,7 @@ def test_rebuild_from_events_matches_incremental():
         conn.close()
     rebuilt = ([dict(r) for r in facts_rows("mob_facts")], [dict(r) for r in facts_rows("loot_facts")],
                [dict(r) for r in facts_rows("ground_spawn_facts")],
+               [dict(r) for r in facts_rows("vendor_catalog_facts")],
                [(r["zone_name"], r["ts"]) for r in facts_rows("zone_visits", "zone_name, ts")])
     assert incremental == rebuilt
 

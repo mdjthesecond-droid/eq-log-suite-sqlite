@@ -112,7 +112,41 @@ def main(game="eql"):
             nokill = lambda rs: sum(1 for r in rs if not r["kill_count"])  # noqa: E731
             print(f"    over 100%: {over(old)} -> {over(new)};  drops with no kill counted: {nokill(old)} -> {nokill(new)}")
     ok &= verify_zoneinfo(game)
+    ok &= verify_npc_detail(game)
     return ok
+
+
+def verify_npc_detail(game):
+    """Every NPC's detail page, at "all" and at each loot tier: facts version
+    vs the pre-facts version (the combat table and dialogue are shared
+    code, so not compared)."""
+    names = [r["npc"] for r in app._compute_npc_list(game)]
+    tier_key = lambda t: (str(t["tier"] if t["tier"] is not None else 0), t["tier_label"])  # noqa: E731
+
+    def norm(d):
+        return {
+            "zones": sorted(z.lower() for z in d["zones"]),
+            "levels": (d["level_min"], d["level_max"]),
+            "rare": bool(d["rare"]), "kills": int(d["total_kills"] or 0), "vendor": bool(d["vendor"]),
+            "catalog": sorted((c["item"].lower(), c["qty"], c["price"] or "") for c in d["catalog"]),
+            "loot": sorted((r["item"].lower(), float(r["avg_qty"] or 0), r["drops"]) for r in d["loot"]),
+            "loot_tiers": sorted(set(tier_key(t) for t in d["loot_tiers"])),
+        }
+    pages = same = 0
+    shown = 0
+    for name in names:
+        tiers = ["all"] + sorted({tier_key(t)[0] for t in app._compute_npc_detail(game, name)["loot_tiers"]})
+        for tier in tiers:
+            a, b = norm(app._compute_npc_detail(game, name, tier)), norm(app._compute_npc_detail_from_events(game, name, tier))
+            pages += 1
+            if a == b:
+                same += 1
+                continue
+            if shown < 12:
+                shown += 1
+                print(f"  DIFFER {name!r} tier={tier}: " + "; ".join(f"{k}: facts {a[k]} events {b[k]}" for k in a if a[k] != b[k]))
+    print(f"/npcs detail: {len(names)} NPCs, {pages} pages; {same} identical, {pages - same} DIFFER")
+    return same == pages
 
 
 def verify_zoneinfo(game):

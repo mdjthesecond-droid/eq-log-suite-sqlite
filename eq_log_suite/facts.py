@@ -30,6 +30,8 @@ attributes everything to a zone in the first place:
 * cons, level_min/max, rare
 * loot          item, number of drops, total quantity
 * ground spawns item picked up off the ground, per zone (ground_spawn_facts)
+* vendor catalog item x quantity x price you bought from a vendor
+                (vendor_catalog_facts, per vendor -- not per zone)
 * HP            only for rare mobs: one is only ever up at a time, so the
                 damage it took until it died is its HP. Ordinary names can't
                 be pinned to one mob (three "a ghoul"s at once), so no HP for
@@ -78,6 +80,7 @@ class FactExtractor:
         self.mobs: dict = {}        # pending deltas, keyed (npc, base_zone, tier, solo)
         self.loot: dict = {}        # pending deltas, keyed (npc, base_zone, tier, solo, item)
         self.ground: dict = {}      # pending deltas, keyed (base_zone, tier, solo, item)
+        self.catalog: dict = {}     # pending deltas, keyed (npc, item, qty, price_text)
         self.visits: list = []
         self.fight: dict = {}       # npc -> [damage taken so far, last hit ts], for rare HP
         self.engaged: dict = {}     # npc -> last time you and it traded hits
@@ -225,6 +228,10 @@ class FactExtractor:
             return
 
         if et in ("npc_dialogue", "vendor_buy", "vendor_sell") and ev.source_name and not _is_dummy(ev.source_name):
+            if et == "vendor_buy" and ev.target_name:
+                key = (ev.source_name, ev.target_name, ev.amount if ev.amount is not None else 1,
+                       extra.get("price_text") or "")
+                self.catalog[key] = self.catalog.get(key, 0) + 1
             m = self._mob(ev.source_name, ts)
             m["listed"] = 1
             m["dialogue_lines" if et == "npc_dialogue" else "vendor_events"] += 1
@@ -259,7 +266,7 @@ class FactExtractor:
     def flush(self):
         """Writes pending facts. Doesn't commit -- the caller commits them
         together with the lines they came from."""
-        if not (self.mobs or self.loot or self.ground or self.visits):
+        if not (self.mobs or self.loot or self.ground or self.catalog or self.visits):
             return
         with self.conn.cursor() as cur:
             for ts, name, base, tier, label, solo in self.visits:
@@ -307,9 +314,17 @@ class FactExtractor:
                     "ON CONFLICT (game_id, base_zone, tier, solo, item) DO UPDATE SET times = times + excluded.times",
                     (self.game_id, base, tier, solo, item, times),
                 )
+            for (npc, item, qty, price), times in self.catalog.items():
+                cur.execute(
+                    "INSERT INTO vendor_catalog_facts (game_id, npc, item, qty, price_text, times) "
+                    "VALUES (%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT (game_id, npc, item, qty, price_text) DO UPDATE SET times = times + excluded.times",
+                    (self.game_id, npc, item, qty, price, times),
+                )
         self.mobs.clear()
         self.loot.clear()
         self.ground.clear()
+        self.catalog.clear()
         self.visits.clear()
 
 
@@ -328,7 +343,7 @@ def rebuild(conn, verbose=True):
     database recorded before facts existed, or after a change to what's
     extracted. Replaces all facts; one transaction."""
     with conn.cursor() as cur:
-        for t in ("loot_facts", "ground_spawn_facts", "mob_facts", "zone_visits"):
+        for t in ("loot_facts", "ground_spawn_facts", "vendor_catalog_facts", "mob_facts", "zone_visits"):
             cur.execute(f"DELETE FROM {t}")
         cur.execute("SELECT id, game_id FROM characters")
         chars = cur.fetchall()

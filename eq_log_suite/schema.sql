@@ -249,6 +249,18 @@ CREATE TABLE IF NOT EXISTS ground_spawn_facts (
     PRIMARY KEY (game_id, base_zone, tier, solo, item)
 );
 
+-- What a vendor sells: each distinct item x quantity x price you've bought
+-- from them (price_text '' when the line had none).
+CREATE TABLE IF NOT EXISTS vendor_catalog_facts (
+    game_id INTEGER NOT NULL REFERENCES games(id),
+    npc TEXT COLLATE NOCASE NOT NULL,
+    item TEXT COLLATE NOCASE NOT NULL,
+    qty INTEGER NOT NULL,
+    price_text TEXT COLLATE NOCASE NOT NULL,
+    times INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (game_id, npc, item, qty, price_text)
+);
+
 -- indexes
 CREATE INDEX IF NOT EXISTS idx_zone_visits_char_ts ON zone_visits (character_id, ts);
 CREATE INDEX IF NOT EXISTS idx_recorded_ranges_character ON recorded_ranges (character_id, start_ts);

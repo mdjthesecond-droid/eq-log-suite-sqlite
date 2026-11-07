@@ -2437,6 +2437,105 @@ def _compute_npc_combat_tiers(game, name):
 
 
 def _compute_npc_detail(game, name, tier="all"):
+    # From the knowledge base (facts.py): zones, level range, rare, kills,
+    # loot (and its tier pulldown) and the vendor catalog. Still from
+    # recorded events: the combat table (_compute_npc_combat_tiers -- it
+    # estimates HP for every mob, where facts keep HP only for rares) and the
+    # dialogue transcript, which is history rather than counts. Same page as
+    # the pre-facts version (_compute_npc_detail_from_events), checked by
+    # tools/verify_facts.py.
+    conn = db.get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT f.base_zone, f.tier, f.level_min, f.level_max, f.rare, f.deaths, f.vendor_events, f.listed "
+                "FROM mob_facts f JOIN games g ON g.id=f.game_id WHERE g.code=%s AND f.npc=%s",
+                (game, name),
+            )
+            mobs = cur.fetchall()
+
+            # Tier labels ("Refined") live on the zone visits, not the facts.
+            cur.execute(
+                "SELECT DISTINCT f.tier, zv.tier_label FROM loot_facts f JOIN games g ON g.id=f.game_id "
+                "LEFT JOIN (SELECT DISTINCT base_zone, tier, tier_label FROM zone_visits) zv "
+                "  ON zv.base_zone=f.base_zone AND zv.tier=f.tier "
+                "WHERE g.code=%s AND f.npc=%s ORDER BY f.tier",
+                (game, name),
+            )
+            loot_tiers = [{"tier": str(r["tier"]), "tier_label": r["tier_label"]} for r in cur.fetchall()]
+
+            loot_where, loot_params = "g.code=%s AND f.npc=%s", [game, name]
+            if tier != "all":
+                loot_where += " AND f.tier=%s"; loot_params.append(int(tier))
+            cur.execute(
+                "SELECT f.item, ROUND(1.0 * SUM(f.qty_total) / SUM(f.drops), 1) AS avg_qty, SUM(f.drops) AS drops "
+                "FROM loot_facts f JOIN games g ON g.id=f.game_id "
+                f"WHERE {loot_where} GROUP BY f.item ORDER BY f.item",
+                loot_params,
+            )
+            loot = cur.fetchall()
+
+            cur.execute(
+                "SELECT f.item, f.qty, f.price_text AS price FROM vendor_catalog_facts f JOIN games g ON g.id=f.game_id "
+                "WHERE g.code=%s AND f.npc=%s ORDER BY f.item, f.qty, f.price_text",
+                (game, name),
+            )
+            catalog = cur.fetchall()
+
+            cur.execute("SELECT npc_type, note FROM npc_info WHERE npc=%s", (name,))
+            override = cur.fetchone()
+    finally:
+        conn.close()
+
+    levels_min = [m["level_min"] for m in mobs if m["level_min"] is not None]
+    levels_max = [m["level_max"] for m in mobs if m["level_max"] is not None]
+    is_vendor = bool(catalog) or any(m["vendor_events"] for m in mobs)
+    detail = _npc_dialogue_part(game, name)
+    suggested_type = _suggest_npc_type(name, {"vendor": is_vendor})
+    return {
+        "name": name,
+        "zones": sorted({m["base_zone"] for m in mobs if m["listed"] and m["base_zone"]}),
+        "level_min": min(levels_min) if levels_min else None,
+        "level_max": max(levels_max) if levels_max else None,
+        "rare": any(m["rare"] for m in mobs),
+        "total_kills": sum(m["deaths"] for m in mobs),
+        "combat_tiers": _compute_npc_combat_tiers(game, name),
+        "vendor": is_vendor,
+        "catalog": catalog,
+        "loot": loot,
+        "loot_tiers": loot_tiers,
+        "tier": tier,
+        **detail,
+        "npc_type": (override["npc_type"] if override and override["npc_type"] else suggested_type),
+        "suggested_type": suggested_type,
+        "note": override["note"] if override else None,
+    }
+
+
+def _npc_dialogue_part(game, name):
+    """The NPC page's dialogue transcript and quest begun/ended markers --
+    history, so from recorded events."""
+    dialogue = _compute_dialogue(game, character="", npc=name, zone="")
+    # Best-effort "quest begun/ended" markers -- classic EQ rarely logs a
+    # turn-in action at all (only one confirmed real example exists across
+    # a 425k-line log: "You offered 1 Letter For Doug to Doug." / "You
+    # complete the trade with Doug." -- see h_item_offer/h_trade_complete),
+    # so this stays a heuristic, not guaranteed quest tracking. "ended"
+    # prefers trade_complete over reward where both exist -- a completed
+    # trade is a stronger/more direct completion signal than a reward, and
+    # is the ONLY signal at all when the actual reward was XP/faction
+    # rather than an item/currency `reward` event (confirmed: the one real
+    # trade found gave experience, not a reward line).
+    contact_rows = [r for r in dialogue if r["kind"] in ("hail", "npc_dialogue", "item_offer")]
+    ended_rows = [r for r in dialogue if r["kind"] in ("reward", "trade_complete")]
+    quest_begun_at = min((r["ts"] for r in contact_rows), default=None)
+    quest_ended_at = max((r["ts"] for r in ended_rows), default=None)
+
+    return {"dialogue": dialogue, "quest_begun_at": quest_begun_at, "quest_ended_at": quest_ended_at}
+
+
+def _compute_npc_detail_from_events(game, name, tier="all"):
+    # The pre-facts NPC detail. Kept only for tools/verify_facts.py.
     tier_expr = _tier_expr()
     conn = db.get_connection()
     try:
@@ -2529,21 +2628,7 @@ def _compute_npc_detail(game, name, tier="all"):
     finally:
         conn.close()
 
-    dialogue = _compute_dialogue(game, character="", npc=name, zone="")
-    # Best-effort "quest begun/ended" markers -- classic EQ rarely logs a
-    # turn-in action at all (only one confirmed real example exists across
-    # a 425k-line log: "You offered 1 Letter For Doug to Doug." / "You
-    # complete the trade with Doug." -- see h_item_offer/h_trade_complete),
-    # so this stays a heuristic, not guaranteed quest tracking. "ended"
-    # prefers trade_complete over reward where both exist -- a completed
-    # trade is a stronger/more direct completion signal than a reward, and
-    # is the ONLY signal at all when the actual reward was XP/faction
-    # rather than an item/currency `reward` event (confirmed: the one real
-    # trade found gave experience, not a reward line).
-    contact_rows = [r for r in dialogue if r["kind"] in ("hail", "npc_dialogue", "item_offer")]
-    ended_rows = [r for r in dialogue if r["kind"] in ("reward", "trade_complete")]
-    quest_begun_at = min((r["ts"] for r in contact_rows), default=None)
-    quest_ended_at = max((r["ts"] for r in ended_rows), default=None)
+    detail = _npc_dialogue_part(game, name)
 
     suggested_type = _suggest_npc_type(name, {"vendor": is_vendor})
     return {
@@ -2559,9 +2644,7 @@ def _compute_npc_detail(game, name, tier="all"):
         "loot": loot,
         "loot_tiers": loot_tiers,
         "tier": tier,
-        "dialogue": dialogue,
-        "quest_begun_at": quest_begun_at,
-        "quest_ended_at": quest_ended_at,
+        **detail,
         "npc_type": (override["npc_type"] if override and override["npc_type"] else suggested_type),
         "suggested_type": suggested_type,
         "note": override["note"] if override else None,
