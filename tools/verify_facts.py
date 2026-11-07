@@ -111,7 +111,58 @@ def main(game="eql"):
             over = lambda rs: sum(1 for r in rs if r["chance_pct"] and r["chance_pct"] > 100)  # noqa: E731
             nokill = lambda rs: sum(1 for r in rs if not r["kill_count"])  # noqa: E731
             print(f"    over 100%: {over(old)} -> {over(new)};  drops with no kill counted: {nokill(old)} -> {nokill(new)}")
-    app.LOOT_RESULT_LIMIT = 10**9
+    ok &= verify_zoneinfo(game)
+    return ok
+
+
+def verify_zoneinfo(game):
+    """/zoneinfo list and every zone x tier x solo detail page: facts version
+    vs the pre-facts version, compared as the templates show them."""
+    ok = True
+    new, old = app._compute_zone_list(game), app._compute_zone_list_from_events(game)
+    N, O = {r["zone"]: r for r in new}, {r["zone"]: r for r in old}
+    differ = [(z, {k: (N.get(z, {}).get(k), O.get(z, {}).get(k)) for k in ("level_min", "level_max", "npc_count", "rare_count")
+                   if N.get(z, {}).get(k) != O.get(z, {}).get(k)})
+              for z in sorted(N.keys() | O.keys()) if N.get(z) != O.get(z)]
+    ok &= not differ
+    print(f"/zoneinfo: {len(N)} vs {len(O)} zones; {len(N.keys() | O.keys()) - len(differ)} identical, {len(differ)} DIFFER")
+    for d in differ[:15]:
+        print("   ", d)
+
+    norm_npc = lambda r: (r["npc"].lower(), r["level"], int(bool(r["rare"])), int(r["kills"] or 0),  # noqa: E731
+                          int(r["dialogue_lines"] or 0))
+    norm_loot = lambda r: (r["npc"].lower(), r["item"].lower(), float(r["avg_qty"] or 0), r["drops"])  # noqa: E731
+    pages = same = 0
+    for zone in sorted(N):
+        variants = app._compute_zone_detail(game, zone)["variants"]
+        choices = [("all", "any")] + [(t, "any") for t in sorted({v["tier"] for v in variants})] \
+            + [("all", "1"), ("all", "0")]
+        for tier, solo in choices:
+            a, b = app._compute_zone_detail(game, zone, tier, solo), app._compute_zone_detail_from_events(game, zone, tier, solo)
+            parts = {
+                "tiers": ([(v["tier"], v["tier_label"]) for v in a["variants"]],
+                          sorted({(str(v["tier"] if v["tier"] is not None else 0), v["tier_label"]) for v in b["variants"]},
+                                 key=lambda t: int(t[0]))),
+                "npcs": ([norm_npc(r) for r in a["npcs"]], [norm_npc(r) for r in b["npcs"]]),
+                "loot": ([norm_loot(r) for r in a["loot"]], [norm_loot(r) for r in b["loot"]]),
+                "ground": ([(r["item"].lower(), r["times"]) for r in a["ground_spawns"]],
+                           [(r["item"].lower(), r["times"]) for r in b["ground_spawns"]]),
+                "rares": ([(r["npc"].lower(), r["level"], len(r["drops"])) for r in a["rares"]],
+                          [(r["npc"].lower(), r["level"], len(r["drops"])) for r in b["rares"]]),
+            }
+            # tier-toggle entries: the facts version de-duplicates by tier
+            parts["tiers"] = (sorted(set(parts["tiers"][0]), key=lambda t: int(t[0])), parts["tiers"][1])
+            pages += 1
+            bad = [k for k, (x, y) in parts.items() if x != y]
+            if not bad:
+                same += 1
+                continue
+            ok = False
+            print(f"  DIFFER {zone!r} tier={tier} solo={solo}: {', '.join(bad)}")
+            for k in bad:
+                x, y = parts[k]
+                print(f"     {k}: facts-only {sorted(set(x) - set(y))[:4]}  events-only {sorted(set(y) - set(x))[:4]}")
+    print(f"/zoneinfo detail: {pages} zone x tier/solo pages; {same} identical, {pages - same} DIFFER")
     return ok
 
 

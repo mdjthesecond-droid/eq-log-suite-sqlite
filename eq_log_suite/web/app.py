@@ -1392,6 +1392,66 @@ def _zone_window_where(game, zone, tier="all", solo="any", alias="ev"):
 
 
 def _compute_zone_list(game):
+    # From the knowledge base (facts.py), per base zone over all tiers:
+    # level range = the cons of mobs fought somewhere (mob_facts.fought --
+    # quest-givers/vendors are often far above what you fight there), npcs
+    # seen = conned or spoke here, rare mobs = a con here said rare. Zones =
+    # every zone you've entered (zone_visits). Same rows as the pre-facts
+    # version (_compute_zone_list_from_events), checked by
+    # tools/verify_facts.py -- except where a line and a zone change share a
+    # second (facts follow line order), and names that differ only in
+    # capitalization now count once in "npcs seen" (they did for rares).
+    conn = db.get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT zv.base_zone AS zone FROM zone_visits zv "
+                "JOIN characters c ON c.id=zv.character_id JOIN games g ON g.id=c.game_id "
+                "WHERE g.code=%s AND zv.base_zone != '' ORDER BY zv.base_zone",
+                (game,),
+            )
+            zones = [r["zone"] for r in cur.fetchall()]
+            cur.execute(
+                "SELECT f.base_zone AS zone, "
+                "  MIN(CASE WHEN fought.npc IS NOT NULL THEN f.level_min END) AS level_min, "
+                "  MAX(CASE WHEN fought.npc IS NOT NULL THEN f.level_max END) AS level_max, "
+                "  COUNT(DISTINCT CASE WHEN f.cons>0 OR f.dialogue_lines>0 THEN LOWER(f.npc) END) AS npc_count, "
+                "  COUNT(DISTINCT CASE WHEN f.rare=1 THEN LOWER(f.npc) END) AS rare_count "
+                "FROM mob_facts f JOIN games g ON g.id=f.game_id "
+                "LEFT JOIN (SELECT DISTINCT game_id, npc FROM mob_facts WHERE fought=1) fought "
+                "  ON fought.game_id=f.game_id AND fought.npc=f.npc "
+                "WHERE g.code=%s GROUP BY f.base_zone",
+                (game,),
+            )
+            stats = {r["zone"].lower(): r for r in cur.fetchall()}
+            cur.execute("SELECT zone, level_min_override, level_max_override, note FROM zone_info")
+            overrides = {r["zone"]: r for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+    rows = []
+    for zone in zones:
+        st = stats.get(zone.lower()) or {}
+        override = overrides.get(zone)
+        level_min, level_max = st.get("level_min"), st.get("level_max")
+        if override:
+            if override["level_min_override"] is not None:
+                level_min = override["level_min_override"]
+            if override["level_max_override"] is not None:
+                level_max = override["level_max_override"]
+        rows.append({
+            "zone": zone,
+            "level_min": level_min,
+            "level_max": level_max,
+            "npc_count": st.get("npc_count") or 0,
+            "rare_count": st.get("rare_count") or 0,
+            "note": override["note"] if override else None,
+        })
+    return rows
+
+
+def _compute_zone_list_from_events(game):
+    # The pre-facts /zoneinfo. Kept only for tools/verify_facts.py.
     # base_zone is resolved via a single bulk zone_change fetch + Python
     # bisect (per character), not a correlated SQL subquery per row
     # (_base_zone_expr()) -- confirmed real (2026-08-24): with ~2.7M eql
@@ -1760,7 +1820,173 @@ def _compute_zone_connections(game):
     return sorted(pairs.values(), key=lambda r: (r["from_zone"], -r["times"]))
 
 
+def _zone_quest_history(cur, game, match_where, match_params):
+    """(quest_items, completed_trades) for a zone's _zone_window_where
+    fragment -- timestamped history, not counts, so it stays on recorded
+    events (like /quests) rather than the knowledge base."""
+    # quest/reward items (non-currency reward text) given by NPCs here
+    cur.execute(
+        "SELECT ev.source_name AS npc, "
+        "JSON_UNQUOTE(JSON_EXTRACT(ev.extra,'$.text')) AS item, ev.ts "
+        "FROM events ev JOIN games g ON ev.game_id=g.id "
+        f"WHERE ev.event_type='reward' AND g.code=%s AND {match_where} "
+        "ORDER BY ev.ts DESC",
+        [game] + match_params,
+    )
+    reward_rows = cur.fetchall()
+    quest_items = [r for r in reward_rows if r["item"] and not _CURRENCY_TEXT_RE.match(r["item"])]
+
+    # Completed item turn-ins (item_offer -> trade_complete pairs) --
+    # a different signal from the reward-based quest_items above.
+    # trade_complete carries no info about what was given, only that
+    # an offer succeeded, so items are paired back to whichever
+    # item_offer row(s) immediately preceded it for the same NPC
+    # (same pairing shape as _compute_dialogue). Confirmed real
+    # (Plane of Sky, 2026-08-13): dozens of completed Wind Rune/
+    # artifact exchanges with no `reward` event at all -- the
+    # reward-only quest_items query above silently missed every one
+    # of these, which is what a user noticed as "completed more
+    # quests than the loot list accounts for".
+    cur.execute(
+        "SELECT ev.event_type AS kind, ev.ts, ev.target_name AS npc, "
+        "JSON_UNQUOTE(JSON_EXTRACT(ev.extra,'$.item')) AS item "
+        "FROM events ev JOIN games g ON ev.game_id=g.id "
+        f"WHERE ev.event_type IN ('item_offer','trade_complete') AND g.code=%s AND {match_where} "
+        "ORDER BY ev.ts",
+        [game] + match_params,
+    )
+    trade_events = cur.fetchall()
+    pending_offers = {}
+    completed_trades = []
+    for r in trade_events:
+        if r["kind"] == "item_offer":
+            pending_offers.setdefault(r["npc"], []).append(r["item"])
+        else:
+            items = pending_offers.pop(r["npc"], [])
+            if items:
+                # Not "items" -- Jinja's dot-lookup on a dict tries
+                # getattr() before __getitem__, and dict already has
+                # a real .items() method, so `t.items` in the
+                # template silently resolves to that bound method
+                # instead of this key (confirmed real: 500 error,
+                # "'builtin_function_or_method' object is not
+                # iterable" from the |join filter).
+                completed_trades.append({"ts": r["ts"], "npc": r["npc"], "items_given": items})
+    completed_trades.sort(key=lambda t: t["ts"], reverse=True)
+
+    return quest_items, completed_trades
+
+
+def _zone_rares(npcs, loot):
+    # rare mobs seen here, cross-referenced with their own drops
+    # (from the zone's loot rows) per the user's
+    # explicit ask to be able to check a rare's drops at a glance.
+    # Matched case-insensitively -- same sentence-position
+    # capitalization issue as _compute_zone_list's fought_names
+    # (e.g. "Orc centurion" vs "orc centurion"), so npcs/loot rows
+    # for the same real mob don't fail to cross-reference just
+    # because they came from lines with different casing.
+    rare_names = {n["npc"] for n in npcs if n["rare"]}
+    rares = []
+    for name in sorted(rare_names):
+        rares.append({
+            "npc": name,
+            "level": next((n["level"] for n in npcs if n["npc"].lower() == name.lower()), None),
+            "drops": [l for l in loot if l["npc"].lower() == name.lower()],
+        })
+
+    return rares
+
+
 def _compute_zone_detail(game, zone, tier="all", solo="any"):
+    # From the knowledge base (facts.py): NPCs, loot and ground spawns are
+    # summed from the zone's mob_facts/loot_facts/ground_spawn_facts rows for
+    # the chosen tier/solo variant; the tier toggle comes from zone_visits.
+    # Quest rewards and completed turn-ins are timestamped history, so they
+    # still come from recorded events (_zone_quest_history). Same page as the
+    # pre-facts version (_compute_zone_detail_from_events), checked by
+    # tools/verify_facts.py -- except where a line and a zone change share a
+    # second: facts follow the log's line order, the event version matched
+    # by timestamp alone.
+    where, params = ["g.code=%s", "f.base_zone=%s"], [game, zone]
+    if tier != "all":
+        where.append("f.tier=%s"); params.append(int(tier))
+    if solo != "any":
+        where.append("f.solo=%s"); params.append(1 if solo == "1" else 0)
+    where = " AND ".join(where)
+
+    conn = db.get_connection()
+    try:
+        with conn.cursor() as cur:
+            # Shaped like the zone_change extras the template was written
+            # for: tier as text, solo as 'true'/'false'.
+            cur.execute(
+                "SELECT DISTINCT zv.tier, zv.tier_label, zv.solo FROM zone_visits zv "
+                "JOIN characters c ON c.id=zv.character_id JOIN games g ON g.id=c.game_id "
+                "WHERE g.code=%s AND zv.base_zone=%s",
+                (game, zone),
+            )
+            variants = sorted(
+                ({"tier": str(v["tier"]), "tier_label": v["tier_label"], "solo": "true" if v["solo"] else "false"}
+                 for v in cur.fetchall()),
+                key=lambda v: (int(v["tier"]), v["solo"]),
+            )
+
+            # NPCs that conned, spoke or died here (not ones only looted or
+            # traded with -- as before).
+            cur.execute(
+                "SELECT f.npc, MAX(f.level_max) AS level, MAX(f.rare) AS rare, "
+                "SUM(f.deaths) AS kills, SUM(f.dialogue_lines) AS dialogue_lines "
+                "FROM mob_facts f JOIN games g ON g.id=f.game_id "
+                f"WHERE {where} AND (f.cons>0 OR f.dialogue_lines>0 OR f.deaths>0) "
+                "GROUP BY f.npc ORDER BY f.npc",
+                params,
+            )
+            npcs = cur.fetchall()
+
+            cur.execute(
+                "SELECT f.npc, f.item, ROUND(1.0 * SUM(f.qty_total) / SUM(f.drops), 1) AS avg_qty, "
+                "SUM(f.drops) AS drops "
+                "FROM loot_facts f JOIN games g ON g.id=f.game_id "
+                f"WHERE {where} GROUP BY f.npc, f.item ORDER BY f.npc, f.item",
+                params,
+            )
+            loot = cur.fetchall()
+
+            cur.execute(
+                "SELECT f.item, SUM(f.times) AS times "
+                "FROM ground_spawn_facts f JOIN games g ON g.id=f.game_id "
+                f"WHERE {where} GROUP BY f.item ORDER BY f.item",
+                params,
+            )
+            ground_spawns = cur.fetchall()
+
+            match_where, match_params = _zone_window_where(game, zone, tier, solo)
+            quest_items, completed_trades = _zone_quest_history(cur, game, match_where, match_params)
+            rares = _zone_rares(npcs, loot)
+
+            cur.execute(
+                "SELECT level_min_override, level_max_override, note FROM zone_info WHERE zone=%s",
+                (zone,),
+            )
+            override = cur.fetchone()
+    finally:
+        conn.close()
+
+    return {
+        "variants": variants,
+        "npcs": npcs,
+        "loot": loot,
+        "ground_spawns": ground_spawns,
+        "quest_items": quest_items,
+        "completed_trades": completed_trades,
+        "rares": rares,
+        "override": override,
+    }
+
+
+def _compute_zone_detail_from_events(game, zone, tier="all", solo="any"):
+    # The pre-facts zone detail. Kept only for tools/verify_facts.py.
     match_where, match_params = _zone_window_where(game, zone, tier, solo)
 
     conn = db.get_connection()
@@ -1845,72 +2071,9 @@ def _compute_zone_detail(game, zone, tier="all", solo="any"):
             )
             ground_spawns = cur.fetchall()
 
-            # quest/reward items (non-currency reward text) given by NPCs here
-            cur.execute(
-                "SELECT ev.source_name AS npc, "
-                "JSON_UNQUOTE(JSON_EXTRACT(ev.extra,'$.text')) AS item, ev.ts "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                f"WHERE ev.event_type='reward' AND g.code=%s AND {match_where} "
-                "ORDER BY ev.ts DESC",
-                [game] + match_params,
-            )
-            reward_rows = cur.fetchall()
-            quest_items = [r for r in reward_rows if r["item"] and not _CURRENCY_TEXT_RE.match(r["item"])]
+            quest_items, completed_trades = _zone_quest_history(cur, game, match_where, match_params)
 
-            # Completed item turn-ins (item_offer -> trade_complete pairs) --
-            # a different signal from the reward-based quest_items above.
-            # trade_complete carries no info about what was given, only that
-            # an offer succeeded, so items are paired back to whichever
-            # item_offer row(s) immediately preceded it for the same NPC
-            # (same pairing shape as _compute_dialogue). Confirmed real
-            # (Plane of Sky, 2026-08-13): dozens of completed Wind Rune/
-            # artifact exchanges with no `reward` event at all -- the
-            # reward-only quest_items query above silently missed every one
-            # of these, which is what a user noticed as "completed more
-            # quests than the loot list accounts for".
-            cur.execute(
-                "SELECT ev.event_type AS kind, ev.ts, ev.target_name AS npc, "
-                "JSON_UNQUOTE(JSON_EXTRACT(ev.extra,'$.item')) AS item "
-                "FROM events ev JOIN games g ON ev.game_id=g.id "
-                f"WHERE ev.event_type IN ('item_offer','trade_complete') AND g.code=%s AND {match_where} "
-                "ORDER BY ev.ts",
-                [game] + match_params,
-            )
-            trade_events = cur.fetchall()
-            pending_offers = {}
-            completed_trades = []
-            for r in trade_events:
-                if r["kind"] == "item_offer":
-                    pending_offers.setdefault(r["npc"], []).append(r["item"])
-                else:
-                    items = pending_offers.pop(r["npc"], [])
-                    if items:
-                        # Not "items" -- Jinja's dot-lookup on a dict tries
-                        # getattr() before __getitem__, and dict already has
-                        # a real .items() method, so `t.items` in the
-                        # template silently resolves to that bound method
-                        # instead of this key (confirmed real: 500 error,
-                        # "'builtin_function_or_method' object is not
-                        # iterable" from the |join filter).
-                        completed_trades.append({"ts": r["ts"], "npc": r["npc"], "items_given": items})
-            completed_trades.sort(key=lambda t: t["ts"], reverse=True)
-
-            # rare mobs seen here, cross-referenced with their own drops
-            # (from the loot rows already fetched above) per the user's
-            # explicit ask to be able to check a rare's drops at a glance.
-            # Matched case-insensitively -- same sentence-position
-            # capitalization issue as _compute_zone_list's fought_names
-            # (e.g. "Orc centurion" vs "orc centurion"), so npcs/loot rows
-            # for the same real mob don't fail to cross-reference just
-            # because they came from lines with different casing.
-            rare_names = {n["npc"] for n in npcs if n["rare"]}
-            rares = []
-            for name in sorted(rare_names):
-                rares.append({
-                    "npc": name,
-                    "level": next((n["level"] for n in npcs if n["npc"].lower() == name.lower()), None),
-                    "drops": [l for l in loot if l["npc"].lower() == name.lower()],
-                })
+            rares = _zone_rares(npcs, loot)
 
             cur.execute(
                 "SELECT level_min_override, level_max_override, note FROM zone_info WHERE zone=%s",

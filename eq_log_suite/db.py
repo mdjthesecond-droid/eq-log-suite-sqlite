@@ -107,6 +107,7 @@ _ADDED_COLUMNS = [
     ("mob_facts", "dialogue_lines", "INTEGER NOT NULL DEFAULT 0"),
     ("mob_facts", "vendor_events", "INTEGER NOT NULL DEFAULT 0"),
     ("mob_facts", "listed", "INTEGER NOT NULL DEFAULT 0"),
+    ("mob_facts", "fought", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

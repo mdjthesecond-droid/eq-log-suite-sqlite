@@ -213,6 +213,8 @@ CREATE TABLE IF NOT EXISTS mob_facts (
     dialogue_lines INTEGER NOT NULL DEFAULT 0, -- it spoke (npc_dialogue)
     vendor_events INTEGER NOT NULL DEFAULT 0,  -- you bought from / sold to it
     listed INTEGER NOT NULL DEFAULT 0,         -- conned/spoke/traded/looted/died here: shown on /npcs
+    fought INTEGER NOT NULL DEFAULT 0,         -- in a fight here (hit/hit by/died/resisted) -- /zoneinfo's
+                                               -- level range counts only mobs fought somewhere
     level_min INTEGER NULL,
     level_max INTEGER NULL,
     rare INTEGER NOT NULL DEFAULT 0,          -- a con said so, here
@@ -234,6 +236,17 @@ CREATE TABLE IF NOT EXISTS loot_facts (
     drops INTEGER NOT NULL DEFAULT 0,
     qty_total INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (game_id, npc, base_zone, tier, solo, item)
+);
+
+-- Items picked up off the ground (no source NPC), per zone x tier x solo.
+CREATE TABLE IF NOT EXISTS ground_spawn_facts (
+    game_id INTEGER NOT NULL REFERENCES games(id),
+    base_zone TEXT COLLATE NOCASE NOT NULL,
+    tier INTEGER NOT NULL,
+    solo INTEGER NOT NULL,
+    item TEXT COLLATE NOCASE NOT NULL,
+    times INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (game_id, base_zone, tier, solo, item)
 );
 
 -- indexes

@@ -2,9 +2,9 @@
 derived from each line as it's recorded (tailer and importer -- never from
 viewing a log).
 
-Per mob x base zone x tier x solo (schema.sql: mob_facts, loot_facts), plus
-each character's zone history (zone_visits) that attributes everything to
-a zone in the first place:
+Per mob x base zone x tier x solo (schema.sql: mob_facts, loot_facts,
+ground_spawn_facts), plus each character's zone history (zone_visits) that
+attributes everything to a zone in the first place:
 
 * deaths        every death of the mob seen in the log (group/raid kills too)
 * kills_by_you  the killing blow was yours
@@ -20,8 +20,16 @@ a zone in the first place:
                 whoever landed the blow -- so it's /loot's drop-chance base.
                 (Same-named mobs can't be told apart: another "a ghoul"
                 killed nearby within the window counts too.)
+* fought        it was in a fight here: hit or was hit (any damage line,
+                landed or missed), resisted a spell, had a spell land on it,
+                died or killed. Either side counts, whatever the parser
+                typed it as (many lines can't tell a mob from a player), so
+                player names get rows too -- never `listed`, so no page shows
+                them. /zoneinfo's level range counts only mobs fought
+                somewhere, so a zone's level-70 quest-givers don't stretch it.
 * cons, level_min/max, rare
 * loot          item, number of drops, total quantity
+* ground spawns item picked up off the ground, per zone (ground_spawn_facts)
 * HP            only for rare mobs: one is only ever up at a time, so the
                 damage it took until it died is its HP. Ordinary names can't
                 be pinned to one mob (three "a ghoul"s at once), so no HP for
@@ -44,6 +52,8 @@ import json
 from datetime import timedelta
 
 DAMAGE_TYPES = ("melee", "spell_damage", "ability_damage")
+# Lines that put both sides "in a fight" (the `fought` fact).
+FIGHT_TYPES = DAMAGE_TYPES + ("spell_effect", "spell_resist", "death")
 # A rare that took damage, then nothing for this long, didn't die in that
 # fight (it got away, or we did) -- start counting its HP over.
 HP_FIGHT_GAP = timedelta(minutes=10)
@@ -67,6 +77,7 @@ class FactExtractor:
         self.zone = None            # (base_zone, tier, solo), resolved on the first event
         self.mobs: dict = {}        # pending deltas, keyed (npc, base_zone, tier, solo)
         self.loot: dict = {}        # pending deltas, keyed (npc, base_zone, tier, solo, item)
+        self.ground: dict = {}      # pending deltas, keyed (base_zone, tier, solo, item)
         self.visits: list = []
         self.fight: dict = {}       # npc -> [damage taken so far, last hit ts], for rare HP
         self.engaged: dict = {}     # npc -> last time you and it traded hits
@@ -126,7 +137,8 @@ class FactExtractor:
         m = self.mobs.get(key)
         if m is None:
             m = self.mobs[key] = {"deaths": 0, "kills_by_you": 0, "kills_engaged": 0, "cons": 0,
-                                  "dialogue_lines": 0, "vendor_events": 0, "listed": 0, "level_min": None, "level_max": None,
+                                  "dialogue_lines": 0, "vendor_events": 0, "listed": 0, "fought": 0,
+                                  "level_min": None, "level_max": None,
                                   "rare": 0, "hp": [], "first": ts, "last": ts}
         m["first"] = min(m["first"], ts)
         m["last"] = max(m["last"], ts)
@@ -154,6 +166,16 @@ class FactExtractor:
             solo = 1 if extra.get("solo") else 0
             self.zone = (base, tier, solo)
             self.visits.append((ts, ev.target_name or base, base, tier, extra.get("tier_label"), solo))
+            return
+
+        if et in FIGHT_TYPES:
+            for name, kind in ((ev.source_name, ev.source_type), (ev.target_name, ev.target_type)):
+                if name and kind != "you" and not _is_dummy(name):
+                    self._mob(name, ts)["fought"] = 1
+
+        if et == "ground_spawn" and ev.target_name:
+            key = self.zone + (ev.target_name,)
+            self.ground[key] = self.ground.get(key, 0) + 1
             return
 
         if et == "con" and ev.source_type != "you" and ev.source_name and not _is_dummy(ev.source_name):
@@ -237,7 +259,7 @@ class FactExtractor:
     def flush(self):
         """Writes pending facts. Doesn't commit -- the caller commits them
         together with the lines they came from."""
-        if not (self.mobs or self.loot or self.visits):
+        if not (self.mobs or self.loot or self.ground or self.visits):
             return
         with self.conn.cursor() as cur:
             for ts, name, base, tier, label, solo in self.visits:
@@ -250,14 +272,15 @@ class FactExtractor:
                 hp = m["hp"]
                 cur.execute(
                     "INSERT INTO mob_facts (game_id, npc, base_zone, tier, solo, deaths, kills_by_you, kills_engaged, "
-                    "cons, dialogue_lines, vendor_events, listed, "
+                    "cons, dialogue_lines, vendor_events, listed, fought, "
                     "level_min, level_max, rare, hp_samples, hp_min, hp_max, first_seen, last_seen) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                     "ON CONFLICT (game_id, npc, base_zone, tier, solo) DO UPDATE SET "
                     "deaths = deaths + excluded.deaths, kills_by_you = kills_by_you + excluded.kills_by_you, "
                     "kills_engaged = kills_engaged + excluded.kills_engaged, "
                     "cons = cons + excluded.cons, dialogue_lines = dialogue_lines + excluded.dialogue_lines, "
                     "vendor_events = vendor_events + excluded.vendor_events, listed = MAX(listed, excluded.listed), "
+                    "fought = MAX(fought, excluded.fought), "
                     "level_min = COALESCE(MIN(level_min, excluded.level_min), level_min, excluded.level_min), "
                     "level_max = COALESCE(MAX(level_max, excluded.level_max), level_max, excluded.level_max), "
                     "rare = MAX(rare, excluded.rare), hp_samples = hp_samples + excluded.hp_samples, "
@@ -265,7 +288,7 @@ class FactExtractor:
                     "hp_max = COALESCE(MAX(hp_max, excluded.hp_max), hp_max, excluded.hp_max), "
                     "first_seen = MIN(first_seen, excluded.first_seen), last_seen = MAX(last_seen, excluded.last_seen)",
                     (self.game_id, npc, base, tier, solo, m["deaths"], m["kills_by_you"], m["kills_engaged"], m["cons"],
-                     m["dialogue_lines"], m["vendor_events"], m["listed"],
+                     m["dialogue_lines"], m["vendor_events"], m["listed"], m["fought"],
                      m["level_min"], m["level_max"], m["rare"], len(hp), min(hp) if hp else None,
                      max(hp) if hp else None, m["first"], m["last"]),
                 )
@@ -277,8 +300,16 @@ class FactExtractor:
                     "drops = drops + excluded.drops, qty_total = qty_total + excluded.qty_total",
                     (self.game_id, npc, base, tier, solo, item, drops, qty),
                 )
+            for (base, tier, solo, item), times in self.ground.items():
+                cur.execute(
+                    "INSERT INTO ground_spawn_facts (game_id, base_zone, tier, solo, item, times) "
+                    "VALUES (%s,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT (game_id, base_zone, tier, solo, item) DO UPDATE SET times = times + excluded.times",
+                    (self.game_id, base, tier, solo, item, times),
+                )
         self.mobs.clear()
         self.loot.clear()
+        self.ground.clear()
         self.visits.clear()
 
 
@@ -297,7 +328,7 @@ def rebuild(conn, verbose=True):
     database recorded before facts existed, or after a change to what's
     extracted. Replaces all facts; one transaction."""
     with conn.cursor() as cur:
-        for t in ("loot_facts", "mob_facts", "zone_visits"):
+        for t in ("loot_facts", "ground_spawn_facts", "mob_facts", "zone_visits"):
             cur.execute(f"DELETE FROM {t}")
         cur.execute("SELECT id, game_id FROM characters")
         chars = cur.fetchall()
