@@ -182,6 +182,35 @@ away and a new one starts under the same name, the app tells them apart by
 their first line and reads the new one from the start -- nothing skipped,
 nothing recorded twice.
 
+## What's kept: the knowledge base
+
+Besides the recorded lines, every line that gets recorded (never just
+viewed) also updates lasting facts (`eq_log_suite/facts.py`), per mob x
+zone x tier:
+
+- **Kills** -- every death seen, and **your kills**: the killing blow was
+  yours, *or* you traded hits with it in the minute before it died, *or*
+  you looted its corpse, *or* a group member killed it while you were
+  grouped. Encounter locking makes all of those your kill -- you see the
+  loot -- so they're what `/loot`'s drop chance is measured against.
+- **Loot** -- drops and quantity per item.
+- **Level range and rare flag**, from cons; **HP only for rare mobs** (one
+  is up at a time, so the damage it took until it died is its HP; reads low
+  if others' damage is missing from your log).
+- **Where it's been seen**, and NPCs you only talked to or traded with.
+
+`/loot` and `/npcs` read these facts. If a database recorded lines before
+the facts existed, or after the parser learned new lines, run once (stop
+the app first):
+
+```bash
+.venv/bin/python -m eq_log_suite.backfill --all   # re-read lines the parser didn't know
+.venv/bin/python -m eq_log_suite.facts            # rebuild every fact from recorded lines
+```
+
+`tools/verify_facts.py` checks the facts against the pages' original
+calculations on any database (read-only).
+
 ## Extending to a new game
 
 1. Get a real log sample (enable in-game logging, play a bit).
