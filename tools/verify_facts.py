@@ -41,7 +41,7 @@ def main(game="eql"):
             if v is not None:
                 a[k] = v if a[k] is None else f(a[k], v)
         a["rare"] |= m["rare"]
-    page = app._compute_npc_list(game)
+    page = app._compute_npc_list_from_events(game)
     differ, talk_only = [], 0
     for r in page:
         want = (int(r["kills"] or 0), r["level_min"], r["level_max"], int(bool(r["rare"])))
@@ -61,7 +61,7 @@ def main(game="eql"):
 
     # /npcs as the page renders it: facts version vs the pre-facts version
     for label, kw in (("no filter", {}), ("search", {"search": "an"}), ("zone", {"zone": "Kedge"})):
-        new, old = app._compute_npc_list_from_facts(game, **kw), app._compute_npc_list(game, **kw)
+        new, old = app._compute_npc_list(game, **kw), app._compute_npc_list_from_events(game, **kw)
         norm = lambda r: {**r, "rare": int(bool(r["rare"])), "vendor": int(bool(r["vendor"])),  # noqa: E731
                           "kills": int(r["kills"] or 0), "dialogue_lines": int(r["dialogue_lines"] or 0)}
         same = [norm(r) for r in new] == [norm(r) for r in old]

@@ -2004,9 +2004,10 @@ def _suggest_npc_type(name, rare_or_vendor_stats):
     return "npc"
 
 
-def _compute_npc_list_from_facts(game, search="", zone=""):
-    # NOT LIVE YET (page still uses _compute_npc_list): zone lists differ for
-    # same-second death/zone-change ordering, see tools/verify_facts.py.
+def _compute_npc_list(game, search="", zone=""):
+    # Differs from the event version only where a death and a zone change
+    # share a second: facts follow the log's line order (died, then zoned),
+    # the event version matched by timestamp alone -- facts are the right one.
     # From the knowledge base (facts.py): mob_facts rows marked `listed`
     # (conned / spoke / traded / looted / died -- what this page has always
     # listed), summed over zones and tiers. Same rows as the pre-facts
@@ -2058,8 +2059,8 @@ def _compute_npc_list_from_facts(game, search="", zone=""):
 
 
 
-def _compute_npc_list(game, search="", zone=""):
-    # /npcs, computed from recorded events (still the live version).
+def _compute_npc_list_from_events(game, search="", zone=""):
+    # The pre-facts /npcs. Kept only for tools/verify_facts.py.
     # "Test <level>" sparring dummies (see _is_test_dummy) are excluded --
     # artificial unlimited HP, not real content worth searching/browsing.
     sql = (
