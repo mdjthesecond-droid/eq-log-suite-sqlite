@@ -3553,6 +3553,8 @@ def _picker_context(request: Request, error: str = "") -> dict:
     return {
         "state": window,
         "logs": live_window.list_logs(),
+        "last": live_window.last_selected(),
+        "default_window": live_window.DEFAULT_WINDOW,
         "windows": live_window.WINDOWS,
         "error": error or request.query_params.get("picker_error", ""),
         "next": here,

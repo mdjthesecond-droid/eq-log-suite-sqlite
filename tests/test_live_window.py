@@ -138,18 +138,53 @@ def test_pick_before_first_page_load_sticks():
     assert st["window"] == "all", st["window"]
 
 
-def test_restart_behavior():
+def test_launch_starts_empty_last_log_only_preselected():
     log = LOGS / "eqlog_Tester_testserver.txt"
-    lw.select(str(log), "now")
-    since = lw.db.get_setting("live.now_since")
-    # simulate an app restart: "now" keeps its original start
-    lw._started = False
-    st = lw.ensure_started()
-    assert st["window"] == "now" and st["cutoff"] == since
-    # any other window comes back as the 24h default
     lw.select(str(log), "1w")
+    assert _count()[0] > 0
+    # simulate a fresh launch of the app
     lw._started = False
-    assert lw.ensure_started()["window"] == "24h"
+    assert lw.ensure_started() == {} and lw.state() == {}
+    assert _count()[0] == 0                      # nothing carried over from last run
+    assert lw.last_selected() == str(log)        # ...just remembered for the dropdown
+
+
+def _kb_lines(path):
+    conn = lw.db.get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) n FROM raw_lines r JOIN log_sources ls ON ls.id=r.log_source_id "
+                        "JOIN characters c ON c.id=ls.character_id WHERE c.name=%s", ("Recorder",))
+            return cur.fetchone()["n"]
+    finally:
+        conn.close()
+
+
+def test_selecting_records_into_database_once():
+    log = LOGS / "eqlog_Recorder_testserver.txt"
+    base = datetime.now() - timedelta(hours=2)
+    write_log(log, base, range(50))
+    lw.select(str(log), "24h")
+    assert _kb_lines(log) == 50
+    lw.select(str(log), "all")                   # same file again: nothing new
+    assert _kb_lines(log) == 50
+    copy = LOGS / "eqlog_Recorder_testserver.txt.archived"
+    copy.write_bytes(log.read_bytes())
+    lw.select(str(copy), "all")                  # a copy under another name: nothing new
+    assert _kb_lines(log) == 50
+    with open(log, "ab") as f:                   # the game kept writing
+        for i in range(50, 60):
+            f.write(melee(base + timedelta(seconds=i)))
+    lw.select(str(log), "24h")
+    assert _kb_lines(log) == 60
+    # and it's the one log marked as followed
+    conn = lw.db.get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT file_path FROM log_sources WHERE live=1")
+            assert [r["file_path"] for r in cur.fetchall()] == [str(log)]
+    finally:
+        conn.close()
 
 
 def test_live_connection_sees_both_databases():
@@ -160,7 +195,8 @@ def test_live_connection_sees_both_databases():
             rows = cur.fetchall()
     finally:
         conn.close()
-    assert rows and rows[0]["who"] == "Tester", rows
+    # events live in the live file, character names in the permanent database
+    assert rows and rows[0]["who"] == lw.state()["character_name"] and rows[0]["n"] == lw.state()["event_count"], rows
 
 
 def test_lists_rotated_and_recent():

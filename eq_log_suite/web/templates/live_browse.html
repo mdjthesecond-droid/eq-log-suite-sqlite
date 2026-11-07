@@ -3,8 +3,9 @@
 {% block content %}
 <h1>Browse for a log</h1>
 <p style="opacity:0.8;">Pick any <code>eqlog_*</code> file -- an archived or rotated log, another
-character's, a friend's. It's opened in the Live view only; nothing is added to the database.
-Once opened, it stays in the picker's list.</p>
+character's, a friend's. Opening it loads it into the Live view and records it into the
+database; anything already recorded (e.g. from a copy of the same log) is skipped. Once opened,
+it stays in the picker's list.</p>
 
 <p><strong>{{ listing.dir }}</strong></p>
 {% if listing.error %}<p class="live-picker-error">{{ listing.error }}</p>{% endif %}

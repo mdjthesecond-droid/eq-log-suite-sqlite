@@ -9,7 +9,7 @@
       <option value="{{ st.path }}" selected>{{ st.file_name }}</option>
       {% endif %}
       {% for l in picker.logs %}
-      <option value="{{ l.path }}" {% if st and l.path == st.path %}selected{% endif %}>
+      <option value="{{ l.path }}" {% if (st and l.path == st.path) or (not st and l.path == picker.last) %}selected{% endif %}>
         {{ l.name }} -- {{ l.mtime.strftime('%a %b %d %H:%M') }}{% if not l.in_default_folder %} (elsewhere){% endif %}
       </option>
       {% endfor %}
@@ -22,7 +22,7 @@
   <label>Window
     <select name="window">
       {% for key, label in picker.windows.items() %}
-      <option value="{{ key }}" {% if st and st.window == key %}selected{% endif %}>{{ label }}</option>
+      <option value="{{ key }}" {% if (st and st.window == key) or (not st and key == picker.default_window) %}selected{% endif %}>{{ label }}</option>
       {% endfor %}
     </select>
   </label>
@@ -31,7 +31,8 @@
     {% if picker.error %}
       <span class="live-picker-error">{{ picker.error }}</span>
     {% elif not st %}
-      Nothing loaded yet -- pick a log and window.
+      No log selected -- pick one and Load. Loading a log also records it into the database
+      (only what isn't already there).
     {% elif st.missing %}
       <span class="live-picker-error">{{ st.path }} is gone (moved or deleted) -- pick another log or Browse to it.</span>
     {% else %}

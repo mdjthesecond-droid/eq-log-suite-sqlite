@@ -24,9 +24,9 @@ moved to an archive and a fresh one started), the window is reloaded from
 scratch instead of reading from a stale byte position.
 
 Windows are counted back from the current time. "now" means "from the
-moment it was picked": that moment is saved, so the session survives an
-app restart. Any other window resets to the 24h default on the next start;
-the chosen log is remembered either way.
+moment it was picked". The app starts empty every time: live data is only
+ever the log explicitly selected in this run (selecting it is also what
+records it into the database -- see select()).
 """
 
 import json
@@ -335,77 +335,69 @@ def refresh() -> dict:
             raw.close()
 
 
+def _record(path: str, game_code: str):
+    """Reads the selected log into the permanent database: the whole file
+    the first time (or if it's a different file than last time -- see
+    coverage.py), only what's new since the saved offset otherwise, never a
+    line that's already recorded under any file name. Also makes it the one
+    log being followed (live=1)."""
+    from eq_log_suite.importer import import_file
+    import_file(path, game_code, None, None)
+    kb = db.get_connection()
+    try:
+        with kb.cursor() as cur:
+            cur.execute("UPDATE log_sources SET live = CASE WHEN file_path=%s THEN 1 ELSE 0 END", (path,))
+        kb.commit()
+    finally:
+        kb.close()
+
+
 def select(path: str, window: str) -> dict:
-    """The picker's action: load `path` over `window` and remember the
-    choice. Raises ValueError for an unknown window or a file that can't be
-    read or identified."""
+    """The picker's action, and the only way a log becomes active: record
+    `path` into the database (de-duplicated), load it into the Live window
+    over `window`, and make it the log being followed. Raises ValueError for
+    an unknown window or a file that can't be read or identified."""
     global _started
     if window not in WINDOWS:
         raise ValueError(f"unknown window {window!r}")
     path = str(Path(path).expanduser())
     if not os.path.isfile(path):
         raise ValueError(f"{path} isn't a file")
-    cutoff = cutoff_for(window)
     with _lock:
-        state = _load(path, window, cutoff)
-        # An explicit pick is this process's startup decision -- otherwise
-        # the first page load afterwards would run ensure_started() and
-        # reset the window it was just given to the 24h default.
-        _started = True
+        _started = True  # an explicit pick is this process's starting point
+        _record(path, _parser_for(path, None).game_code)
+        state = _load(path, window, cutoff_for(window))
     db.set_setting("live.log_path", path)
-    db.set_setting("live.window", window)
-    db.set_setting("live.now_since", cutoff.isoformat() if window == "now" else None)
     recent = [p for p in (db.get_setting("live.recent") or []) if p != path]
     db.set_setting("live.recent", [path] + recent[: RECENT_LIMIT - 1])
     return state
 
 
-def default_log() -> str | None:
-    """The log the game is currently writing to: the newest live log
-    source among enabled games, else the newest log in a configured folder."""
-    enabled = db.enabled_games()
-    kb = db.get_connection()
-    try:
-        with kb.cursor() as cur:
-            cur.execute("SELECT ls.file_path, g.code FROM log_sources ls JOIN games g ON g.id=ls.game_id WHERE ls.live=1")
-            live = [r["file_path"] for r in cur.fetchall() if r["code"] in enabled and os.path.isfile(r["file_path"])]
-    finally:
-        kb.close()
-    candidates = live or [l["path"] for l in list_logs() if l["in_default_folder"]]
-    return max(candidates, key=os.path.getmtime) if candidates else None
+def last_selected() -> str | None:
+    """The log selected last time, if it still exists -- only used to
+    pre-select it in the picker. Nothing is loaded until it's picked."""
+    path = db.get_setting("live.log_path")
+    return path if path and os.path.isfile(path) else None
 
 
 def ensure_started() -> dict:
-    """Once per process, before the first Live page: reopen the remembered
-    log -- a "now" session keeps its original start, anything else comes
-    back as the 24h default. Reuses the existing live file untouched (just
-    catching up) when it already holds exactly that window."""
+    """Live data is only ever the log explicitly selected in this run of
+    the app. So the first time anything asks, in a fresh process, whatever
+    the live file holds from a previous run is cleared: the app starts
+    empty and waits for a selection. After that, just catches up."""
     global _started
     with _lock:
         if _started:
             return refresh()
         _started = True
-        path = db.get_setting("live.log_path")
-        if not path or not os.path.isfile(path):
-            path = default_log()
-        if not path:
-            return {}
-        now_since = db.get_setting("live.now_since")
-        if db.get_setting("live.window") == "now" and now_since:
-            window, cutoff = "now", datetime.fromisoformat(now_since)
-        else:
-            window, cutoff = DEFAULT_WINDOW, cutoff_for(DEFAULT_WINDOW)
         raw = _raw()
         try:
-            meta = _meta(raw)
+            raw.execute("DELETE FROM events")
+            raw.execute("DELETE FROM live_meta")
+            raw.commit()
         finally:
             raw.close()
-        if window == "now" and meta.get("path") == path and meta.get("cutoff") == cutoff.isoformat():
-            return refresh()
-        state = _load(path, window, cutoff)
-        db.set_setting("live.log_path", path)
-        db.set_setting("live.window", window)
-        return state
+        return {}
 
 
 def connection():
