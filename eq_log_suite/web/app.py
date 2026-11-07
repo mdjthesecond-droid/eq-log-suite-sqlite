@@ -2333,7 +2333,11 @@ def npc_info_set(npc: str = Form(...), npc_type: str = Form(""), note: str = For
 
 @app.get("/api/events/since/{last_id}")
 def events_since(last_id: int, limit: int = 200):
-    conn = db.get_connection()
+    # The Live window's events (live_window.py). `generation` identifies
+    # the load they belong to: ids restart when another log/window is
+    # loaded (or the app restarts), so the page starts over when it changes.
+    conn = live_window.connection()
+    generation = live_window.generation()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -2344,7 +2348,7 @@ def events_since(last_id: int, limit: int = 200):
             rows = cur.fetchall()
     finally:
         conn.close()
-    return JSONResponse([{**r, "ts": r["ts"].isoformat()} for r in rows])
+    return JSONResponse({"generation": generation, "events": [{**r, "ts": r["ts"].isoformat()} for r in rows]})
 
 
 DAMAGE_EVENT_TYPES_SQL = "('melee','spell_damage','ability_damage')"
@@ -3606,20 +3610,37 @@ def live_window_browse(request: Request, dir: str = "", next: str = "/encounters
 
 @app.get("/live", response_class=HTMLResponse)
 def live(request: Request):
-    conn = db.get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT MAX(id) AS max_id FROM events")
-            max_id = cur.fetchone()["max_id"] or 0
-            cur.execute(
-                "SELECT target_name FROM events WHERE event_type='zone_change' AND source_type='you' "
-                "ORDER BY id DESC LIMIT 1"
-            )
-            row = cur.fetchone()
-            current_zone = row["target_name"] if row else None
-    finally:
-        conn.close()
-    return templates.TemplateResponse(request, "live.html", {"start_id": max_id, "current_zone": current_zone})
+    # Live view: the selected log's window (live_window.py). The current
+    # zone comes from the window if it has a zone change, else from what's
+    # recorded for this character before it (e.g. a "From now on" window
+    # that started mid-zone).
+    window = live_window.state()
+    max_id, current_zone = 0, None
+    if window and not window.get("missing"):
+        conn = live_window.connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT MAX(id) AS max_id FROM events")
+                max_id = cur.fetchone()["max_id"] or 0
+                cur.execute(
+                    "SELECT target_name FROM events WHERE event_type='zone_change' AND source_type='you' "
+                    "ORDER BY id DESC LIMIT 1"
+                )
+                row = cur.fetchone()
+                if not row:
+                    cur.execute(
+                        "SELECT target_name FROM kb.events WHERE event_type='zone_change' AND source_type='you' "
+                        "AND character_id=%s ORDER BY ts DESC, id DESC LIMIT 1",
+                        (window["character_id"],),
+                    )
+                    row = cur.fetchone()
+                current_zone = row["target_name"] if row else None
+        finally:
+            conn.close()
+    return templates.TemplateResponse(request, "live.html", {
+        "start_id": max_id, "current_zone": current_zone, "ready": bool(window) and not window.get("missing"),
+        "generation": window.get("generation") if window else None, "picker": _picker_context(request),
+    })
 
 
 @app.get("/alerts", response_class=HTMLResponse)

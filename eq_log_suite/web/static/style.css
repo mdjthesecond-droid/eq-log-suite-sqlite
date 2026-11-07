@@ -110,3 +110,4 @@ pre { white-space: pre-wrap; word-break: break-word; background: #1c1f29; paddin
 .live-picker-status { flex-basis: 100%; font-size: 0.9rem; opacity: 0.85; }
 .live-picker-error { color: #d9534f; }
 .live-picker-recording { color: #3c9a5f; }
+.nav-group { opacity: 0.6; font-size: 0.85em; margin-right: -0.4em; }

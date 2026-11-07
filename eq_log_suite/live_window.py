@@ -34,6 +34,7 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -289,6 +290,9 @@ def _load(path: str, window: str, cutoff: datetime | None) -> dict:
             file_id=_file_id(path), start_offset=offset, loaded_offset=new_offset, line_no=new_line_no,
             loaded_at=datetime.now().isoformat(timespec="seconds"), load_seconds=round(time.monotonic() - t0, 2),
             game_code=ident["game_code"], character_id=ident["character_id"],
+            # Changes on every (re)load: event ids restart with each load, so
+            # a page polling "events after id N" must start over when it does.
+            generation=uuid.uuid4().hex,
         )
         raw.commit()
         return _meta(raw)
@@ -406,6 +410,15 @@ def ensure_started() -> dict:
         finally:
             raw.close()
         return {}
+
+
+def generation() -> str | None:
+    """Id of the current load (see _load), None if nothing's loaded."""
+    raw = _raw()
+    try:
+        return _meta(raw).get("generation")
+    finally:
+        raw.close()
 
 
 def connection():
