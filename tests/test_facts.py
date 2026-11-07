@@ -137,6 +137,34 @@ def test_looted_corpse_counts_as_your_kill():
     assert (m["deaths"], m["kills_engaged"]) == (2, 1), dict(m)
 
 
+def test_group_kills_count_while_grouped():
+    d = TMP / "group"
+    d.mkdir()
+    log = d / "eqlog_Delta_s1.txt"
+    log.write_text("".join([
+        L(0, "You have entered Kedge Keep."),
+        L(1, "You have joined the group."),
+        L(2, "Risutachi has joined the group."),
+        L(3, "Hunakea has joined the group."),
+        L(10, "A seahorse has been slain by Risutachi!"),     # healing/pulling -- still yours
+        L(20, "Hunakea has left the group."),
+        L(30, "A seahorse has been slain by Hunakea!"),       # not in your group anymore
+        L(40, "You have been slain by a seahorse!"),          # your death: parsed now
+        L(50, "You have been removed from the group."),
+        L(60, "A seahorse has been slain by Risutachi!"),     # you're not grouped now
+    ]), newline="")
+    import_file(str(log), "eql", None, None)
+    m = mob("a seahorse", "Kedge Keep")
+    assert (m["deaths"], m["kills_engaged"]) == (3, 1), dict(m)
+    conn = db.get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) n FROM events WHERE event_type='death' AND target_type='you'")
+            assert cur.fetchone()["n"] == 1
+    finally:
+        conn.close()
+
+
 def test_copy_of_same_log_adds_no_facts():
     before = [dict(r) for r in facts_rows("mob_facts")], [dict(r) for r in facts_rows("loot_facts")]
     visits_before = len(facts_rows("zone_visits"))

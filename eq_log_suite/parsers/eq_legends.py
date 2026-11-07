@@ -422,6 +422,38 @@ def h_slain_by(m):
     )
 
 
+def h_you_slain_by(m):
+    # "You have been slain by Terror!" -- confirmed real (4 in Sep 2026
+    # logs, the only form of your own death seen there; "You died." above
+    # was never seen in them).
+    source = m.group("source")
+    return ParsedEvent(
+        ts=None, raw_line=None, event_type="death",
+        source_name=source, source_type=GameParser.classify_actor(source),
+        target_name="You", target_type="you",
+        verb=None, amount=None, outcome=None,
+    )
+
+
+def h_group(m):
+    # Group membership -- confirmed real wordings (Sep 7 2026 session):
+    #   "You have joined the group."            -> you, joined
+    #   "Risutachi has joined the group."       -> Risutachi, joined
+    #   "Hunakea has left the group."           -> Hunakea, left
+    #   "You have been removed from the group." -> you, removed
+    # facts.py uses it to count your group's kills as yours (encounter
+    # locking). Other wordings (e.g. leaving or disbanding yourself) get
+    # added once a real line shows them.
+    who = m.group("who")
+    you = who == "You"
+    return ParsedEvent(
+        ts=None, raw_line=None, event_type="group",
+        source_name="You" if you else who, source_type="you" if you else GameParser.classify_actor(who),
+        target_name=None, target_type=None,
+        verb=m.group("verb"), amount=None, outcome=None,
+    )
+
+
 def h_you_died(m):
     # "You died." doesn't say what killed you -- source is left unknown.
     return ParsedEvent(
@@ -910,6 +942,10 @@ class EQLegendsParser(GameParser):
         (re.compile(r"^(?P<source>.+?) has slain (?P<target>.+?)!$"), h_slain_other),
         (re.compile(r"^(?P<target>.+?) has been slain by (?P<source>.+?)!$"), h_slain_by),
         (re.compile(r"^You died\.$"), h_you_died),
+        (re.compile(r"^You have been slain by (?P<source>.+?)!$"), h_you_slain_by),
+        (re.compile(r"^(?P<who>You) have (?P<verb>joined) the group\.$"), h_group),
+        (re.compile(r"^(?P<who>You) have been (?P<verb>removed) from the group\.$"), h_group),
+        (re.compile(r"^(?P<who>[A-Z][a-z`']+) has (?P<verb>joined|left) the group\.$"), h_group),
         (re.compile(r"^You escape from combat\.$"), h_escape),
 
         # "A grikbar kobold resisted your Stun!" (format expected, not yet observed in sample)

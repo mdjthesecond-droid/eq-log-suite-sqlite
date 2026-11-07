@@ -11,7 +11,11 @@ a zone in the first place:
 * kills_engaged you were in the fight: the killing blow was yours, or you
                 and it traded hits within ENGAGED_WINDOW before it died, or
                 you looted its corpse (only your encounter's kills can be
-                looted -- covers being dead while the party finished it).
+                looted -- covers being dead while the party finished it), or
+                a member of your group landed the blow while you were in it
+                (healing, pulling, running up -- encounter locking makes it
+                your kill). Group membership comes from the log's "... has
+                joined/left the group" lines.
                 Encounter locking makes that your kill -- you see its loot
                 whoever landed the blow -- so it's /loot's drop-chance base.
                 (Same-named mobs can't be told apart: another "a ghoul"
@@ -67,6 +71,7 @@ class FactExtractor:
         self.fight: dict = {}       # npc -> [damage taken so far, last hit ts], for rare HP
         self.engaged: dict = {}     # npc -> last time you and it traded hits
         self.uncounted: dict = {}   # npc -> (mob key, death ts) of its last death not yet counted as yours
+        self.group = None           # set of member names (lowercase) while you're in a group, else None
         with conn.cursor() as cur:
             cur.execute("SELECT DISTINCT npc FROM mob_facts WHERE game_id=%s AND rare=1", (game_id,))
             self.rares = {r["npc"].lower() for r in cur.fetchall()}
@@ -86,6 +91,33 @@ class FactExtractor:
             cur.execute("SELECT zone FROM zone_start_overrides WHERE character_id=%s", (self.character_id,))
             row = cur.fetchone()
         return (row["zone"], 0, 0) if row else ("", 0, 0)
+
+    def _resolve_group(self, ts):
+        """Group membership as of ts, replayed from this character's recorded
+        group lines -- so a pass starting mid-session (tailer restart) still
+        knows who's in the group."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT source_name, source_type, verb FROM events WHERE character_id=%s "
+                "AND event_type='group' AND ts<%s ORDER BY ts, id",
+                (self.character_id, ts),
+            )
+            rows = cur.fetchall()
+        group = None
+        for r in rows:
+            group = self._apply_group(group, r["source_name"], r["source_type"], r["verb"])
+        return group
+
+    @staticmethod
+    def _apply_group(group, who, who_type, verb):
+        if who_type == "you":
+            return set() if verb == "joined" else None   # removed (or left) -> not in a group
+        if group is not None and who:
+            if verb == "joined":
+                group.add(who.lower())
+            elif verb == "left":
+                group.discard(who.lower())
+        return group
 
     # -- facts --------------------------------------------------------------
 
@@ -107,8 +139,13 @@ class FactExtractor:
             return
         if self.zone is None:
             self.zone = self._resolve_zone(ts)
+            self.group = self._resolve_group(ts)
         et = ev.event_type
         extra = ev.extra or {}
+
+        if et == "group":
+            self.group = self._apply_group(self.group, ev.source_name, ev.source_type, ev.verb)
+            return
 
         if et == "zone_change" and ev.source_type == "you":
             base = extra.get("base_zone") or ev.target_name or ""
@@ -136,7 +173,8 @@ class FactExtractor:
             if ev.source_type == "you":
                 m["kills_by_you"] += 1
             last = self.engaged.get(npc.lower())
-            if ev.source_type == "you" or (last is not None and ts - last <= ENGAGED_WINDOW):
+            by_group = self.group is not None and (ev.source_name or "").lower() in self.group
+            if ev.source_type == "you" or by_group or (last is not None and ts - last <= ENGAGED_WINDOW):
                 m["kills_engaged"] += 1
                 self.uncounted.pop(npc.lower(), None)
             else:
@@ -234,7 +272,7 @@ class FactExtractor:
 
 class _Row:
     """An events-table row shaped like a ParsedEvent, for rebuild()."""
-    __slots__ = ("ts", "event_type", "source_name", "source_type", "target_name", "target_type", "amount", "extra")
+    __slots__ = ("ts", "event_type", "source_name", "source_type", "target_name", "target_type", "amount", "verb", "extra")
 
     def __init__(self, r):
         for k in self.__slots__[:-1]:
@@ -255,7 +293,7 @@ def rebuild(conn, verbose=True):
         fx = FactExtractor(conn, ch["game_id"], ch["id"])
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT ts, event_type, source_name, source_type, target_name, target_type, amount, extra "
+                "SELECT ts, event_type, source_name, source_type, target_name, target_type, amount, verb, extra "
                 "FROM events WHERE character_id=%s ORDER BY ts, id",
                 (ch["id"],),
             )
