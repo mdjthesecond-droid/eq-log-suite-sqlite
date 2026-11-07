@@ -177,7 +177,62 @@ CREATE TABLE IF NOT EXISTS range_edge_lines (
     PRIMARY KEY (range_id, ts, line_hash, occurrence)
 );
 
+-- ---------------------------------------------------------------------------
+-- Knowledge base: what's worth keeping after each encounter is over, derived
+-- as lines are recorded (facts.py) -- never from viewing. Per mob x zone x
+-- tier, where zone is the base zone ("The Permafrost Caverns") and tier/solo
+-- the instance variant, the same grain every Database page works at; the
+-- "All" tier is summed up when a page asks, never stored.
+
+-- Every zone you entered, per character: what attributes everything else to
+-- a zone and tier.
+CREATE TABLE IF NOT EXISTS zone_visits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    character_id INTEGER NOT NULL REFERENCES characters(id),
+    ts TEXT NOT NULL,
+    zone_name TEXT COLLATE NOCASE NOT NULL,      -- as logged: "The Permafrost Caverns - Solo 4 (Refined)"
+    base_zone TEXT COLLATE NOCASE NOT NULL,      -- "The Permafrost Caverns"
+    tier INTEGER NOT NULL DEFAULT 0,
+    tier_label TEXT COLLATE NOCASE NULL,         -- "Refined"
+    solo INTEGER NOT NULL DEFAULT 0
+);
+
+-- One row per mob x zone x tier x solo it's been seen in. base_zone '' =
+-- before any zone was known for that character.
+CREATE TABLE IF NOT EXISTS mob_facts (
+    game_id INTEGER NOT NULL REFERENCES games(id),
+    npc TEXT COLLATE NOCASE NOT NULL,
+    base_zone TEXT COLLATE NOCASE NOT NULL,
+    tier INTEGER NOT NULL,
+    solo INTEGER NOT NULL,
+    deaths INTEGER NOT NULL DEFAULT 0,       -- every death seen (group/raid kills too) -- /npcs, /zoneinfo
+    kills_by_you INTEGER NOT NULL DEFAULT 0, -- killing blow yours -- /loot's drop chance
+    cons INTEGER NOT NULL DEFAULT 0,
+    level_min INTEGER NULL,
+    level_max INTEGER NULL,
+    rare INTEGER NOT NULL DEFAULT 0,          -- a con said so, here
+    hp_samples INTEGER NOT NULL DEFAULT 0,    -- rare mobs only: one rare is up at a time,
+    hp_min INTEGER NULL,                      -- so damage taken until it died is its HP
+    hp_max INTEGER NULL,                      -- (low if others' damage is missing from the log)
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    PRIMARY KEY (game_id, npc, base_zone, tier, solo)
+);
+
+CREATE TABLE IF NOT EXISTS loot_facts (
+    game_id INTEGER NOT NULL REFERENCES games(id),
+    npc TEXT COLLATE NOCASE NOT NULL,
+    base_zone TEXT COLLATE NOCASE NOT NULL,
+    tier INTEGER NOT NULL,
+    solo INTEGER NOT NULL,
+    item TEXT COLLATE NOCASE NOT NULL,
+    drops INTEGER NOT NULL DEFAULT 0,
+    qty_total INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (game_id, npc, base_zone, tier, solo, item)
+);
+
 -- indexes
+CREATE INDEX IF NOT EXISTS idx_zone_visits_char_ts ON zone_visits (character_id, ts);
 CREATE INDEX IF NOT EXISTS idx_recorded_ranges_character ON recorded_ranges (character_id, start_ts);
 CREATE INDEX IF NOT EXISTS idx_game_ts ON events (game_id, ts);
 CREATE INDEX IF NOT EXISTS idx_char_ts ON events (character_id, ts);

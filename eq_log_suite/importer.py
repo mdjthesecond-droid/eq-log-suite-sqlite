@@ -13,7 +13,7 @@ import os
 import sys
 from pathlib import Path
 
-from eq_log_suite import coverage, db, ingest
+from eq_log_suite import coverage, db, facts, ingest
 from eq_log_suite.parsers.registry import detect_parser, get_parser
 
 BATCH_SIZE = 500
@@ -89,6 +89,7 @@ def import_file(path: str, game_code: str | None, character_name: str | None, se
         # already has recorded (so an archived/renamed copy of a log adds
         # nothing twice). Resuming at the saved offset: already exact.
         recorder = coverage.Recorder(conn, character_id, log_source_id, continuing=start_offset > 0)
+        fact_extractor = facts.FactExtractor(conn, game_id, character_id)
 
         # Recompute the starting line number by counting newlines already
         # consumed on a prior run -- cheap relative to the parse itself.
@@ -103,7 +104,8 @@ def import_file(path: str, game_code: str | None, character_name: str | None, se
         def flush():
             nonlocal events_batch, raw_batch
             recorder.flush()  # committed together with the lines by insert_batch
-            ingest.insert_batch(conn, game_id, character_id, log_source_id, events_batch, raw_batch)
+            ingest.insert_batch(conn, game_id, character_id, log_source_id, events_batch, raw_batch,
+                                facts=fact_extractor)
             events_batch = []
             raw_batch = []
 

@@ -23,7 +23,7 @@ def normalize_names(event):
         event.target_name = normalize_actor_name(event.target_name)
 
 
-def insert_batch(conn, game_id, character_id, log_source_id, events_batch, raw_batch):
+def insert_batch(conn, game_id, character_id, log_source_id, events_batch, raw_batch, facts=None):
     """events_batch: list of (idx, ParsedEvent).
     raw_batch: list of (idx, line_no, ts, raw_text) -- one entry per line read,
     whether or not it parsed into an event.
@@ -50,10 +50,14 @@ def insert_batch(conn, game_id, character_id, log_source_id, events_batch, raw_b
             )
             event.db_id = cur.lastrowid
             event_id_by_idx[idx] = cur.lastrowid
+            if facts is not None:
+                facts.observe(event)
         for idx, line_no, ts, raw_text in raw_batch:
             cur.execute(
                 "INSERT INTO raw_lines (log_source_id, line_no, ts, raw_text, event_id) "
                 "VALUES (%s,%s,%s,%s,%s)",
                 (log_source_id, line_no, ts, raw_text, event_id_by_idx.get(idx)),
             )
+    if facts is not None:
+        facts.flush()  # same transaction as the lines they came from
     conn.commit()

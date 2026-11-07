@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from eq_log_suite import coverage, db, ingest
+from eq_log_suite import coverage, db, facts, ingest
 from eq_log_suite.alerts import AlertEngine
 from eq_log_suite.parsers.registry import get_parser
 
@@ -412,6 +412,7 @@ async def tail_log_source(conn, log_source, broadcaster: OverlayBroadcaster):
     # reading a file from the start (new, replaced) checks every line against
     # what's already recorded for this character -- see coverage.py.
     recorder = coverage.Recorder(conn, character_id, log_source_id, continuing=offset > 0)
+    fact_extractor = facts.FactExtractor(conn, game_id, character_id)
     fingerprint_pending = fp_now is None
     try:
         prefix = f.read(offset)
@@ -496,7 +497,8 @@ async def tail_log_source(conn, log_source, broadcaster: OverlayBroadcaster):
                 events_batch = [(0, event)] if event is not None else []
                 raw_batch = [(0, line_no, event.ts if event else None, line)]
                 recorder.flush()  # committed together with the line by insert_batch
-                ingest.insert_batch(conn, game_id, character_id, log_source_id, events_batch, raw_batch)
+                ingest.insert_batch(conn, game_id, character_id, log_source_id, events_batch, raw_batch,
+                                    facts=fact_extractor)
             db.update_log_source_offset(conn, log_source_id, offset)
             line_no += 1
 
