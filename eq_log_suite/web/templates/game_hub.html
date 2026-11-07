@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}{{ game_label }}{% endblock %}
+{% block content %}
+<h1>{{ game_label }}</h1>
+<p>Reports scoped to just this game.</p>
+
+<ul>
+  <li><a href="/loot/{{ game }}">Loot</a> -- drop table per NPC killed: item, zone, quantity, chance% (drops / kills, not just a drop count).</li>
+  <li><a href="/zones/{{ game }}">Zone Encounters</a> -- one row per zone visit: entered/left timestamps, first/last fight, total damage, DPS, kills, hit%/crit%.</li>
+  <li><a href="/zoneinfo/{{ game }}">Zone Info</a> -- one row per zone (all instance tiers combined): connections in/out, NPCs seen, loot, ground spawns, quest items, level range, rare mobs.</li>
+  <li><a href="/npcs/{{ game }}">NPCs</a> -- searchable NPC roster: zones seen, level range, rare/vendor flags, sold items, dialogue transcript.</li>
+  <li><a href="/quests/{{ game }}">Quests</a> -- NPC dialogue transcript (hails, says, bracketed keywords, rewards), zone filled in by correlation. No structured quest-completion event exists for classic EQ, so this is a raw transcript rather than a completions list.</li>
+  {% if game == 'eq' %}
+  <li><a href="/tasks/{{ game }}">Tasks</a> -- live EQ's structured Tasks system: assigned/rewarded per task, with NPC and zone filled in by correlation. Distinct from Quests above, which has no logged completion signal at all.</li>
+  {% endif %}
+</ul>
+
+<p><a href="/">&larr; Back to Home</a> for reports that aren't split by game (encounters, browse events, SQL query).</p>
+{% endblock %}

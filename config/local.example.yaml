@@ -1,0 +1,20 @@
+# Copy this to local.yaml (gitignored) and point log_roots at your EQ log
+# folders. There's no database server or password: the database is a single
+# file, created automatically on first use.
+database:
+  path: data/eqlogs.sqlite3   # relative to the project folder, or absolute
+
+# Folders the tailer auto-scans for new/rotated log files (new character or
+# new server). Scanned once at startup and every few minutes while the
+# tailer runs -- see eq_log_suite/discovery.py.
+log_roots:
+  eql: /home/myself/eql/Logs
+  eq: /home/myself/eq/Logs
+
+# Which of the above the tailer actually watches/discovers -- normally just
+# whichever game you're currently playing. A game left out of this list is
+# left alone entirely, even if its folder doesn't exist (uninstalled, or a
+# broken Steam compatdata symlink) and even if it has log_sources rows
+# already marked live from a previous session.
+enabled_games:
+  - eql

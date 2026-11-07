@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Zone Encounters -- {{ game_label }}{% endblock %}
+{% block content %}
+<h1>Zone Encounters -- {{ game_label }}</h1>
+<p>Search-only: one row per zone visit (the span between one "entered X" and your next zone
+change), with combat stats from whatever damage/kills/melee swings fall inside that window. A
+"left at" marked <em>(est.)</em> means no further zone_change was ever recorded (no logout line
+exists to key off of), so it falls back to that character's last logged activity of any kind as a
+stand-in for when the log stopped, rather than assuming you're still there. This computes across a
+character's entire history per visit, which is slow unfiltered, so it only runs against whatever
+character/zone/date-range you actually ask for -- for casual browsing of a specific zone's info
+(NPCs, loot, connections) rather than your own play history, see <a href="/zoneinfo/{{ game }}">Zone
+Info</a> instead.</p>
+
+<form method="get" action="/zones/{{ game }}">
+  <input name="character" placeholder="character" value="{{ filters.character }}">
+  <input name="zone" placeholder="zone contains" value="{{ filters.zone }}">
+  <input id="start-ts-input" name="start_ts" type="datetime-local" title="entered after" value="{{ filters.start_ts }}">
+  <input id="end-ts-input" name="end_ts" type="datetime-local" title="entered before" value="{{ filters.end_ts }}">
+  <button type="button" id="today-btn" title="fill start/end with today, 00:00 to now">Today</button>
+  <button type="submit">Search</button>
+</form>
+
+{% if not searched %}
+<p>Enter a character, zone, and/or date range above and hit Search.</p>
+{% elif not rows %}
+<p>No zone data matching that search.</p>
+{% endif %}
+
+<div class="scroll-frame">
+<table class="sortable">
+  <thead>
+    <tr>
+      <th>character</th><th>zone</th><th>entered at</th><th>left at</th><th>duration (min)</th>
+      <th>first fight</th><th>last fight</th><th>total dmg</th><th>dps</th><th>kills</th>
+      <th>hit %</th><th>crit %</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.character_name }}</td>
+      <td>{{ r.zone }}</td>
+      <td>{{ r.entered_at }}</td>
+      <td>{{ r.left_at if r.left_at is not none else '' }}{% if r.left_at_estimated %} <em style="opacity:0.7;">(est.)</em>{% endif %}</td>
+      <td>{{ r.duration_min if r.duration_min is not none else '' }}</td>
+      <td>{{ r.first_fight_at if r.first_fight_at is not none else '' }}</td>
+      <td>{{ r.last_fight_at if r.last_fight_at is not none else '' }}</td>
+      <td>{{ r.total_damage }}</td>
+      <td>{{ r.dps if r.dps is not none else '' }}</td>
+      <td>
+        {% if r.npc_kills %}
+        <details>
+          <summary style="cursor:pointer;">{{ r.kills }}</summary>
+          <ul style="margin:0.25rem 0 0; padding-left:1.1rem;">
+            {% for name, count in r.npc_kills %}<li>{{ name }} &times;{{ count }}</li>{% endfor %}
+          </ul>
+        </details>
+        {% else %}{{ r.kills }}{% endif %}
+      </td>
+      <td>{{ r.hit_pct if r.hit_pct is not none else '' }}</td>
+      <td>{{ r.crit_pct if r.crit_pct is not none else '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<script>
+  // Fills the date range with today, 00:00 through right now -- so a same-day
+  // lookup doesn't require typing both timestamps by hand every time.
+  function pad(n) { return String(n).padStart(2, "0"); }
+  function localDatetimeValue(d) {
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  document.getElementById("today-btn").addEventListener("click", () => {
+    const now = new Date();
+    const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    document.getElementById("start-ts-input").value = localDatetimeValue(midnight);
+    document.getElementById("end-ts-input").value = localDatetimeValue(now);
+  });
+</script>
+{% endblock %}

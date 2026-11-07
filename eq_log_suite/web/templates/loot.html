@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Loot -- {{ game_label }}{% endblock %}
+{% block content %}
+<h1>Loot -- {{ game_label }}</h1>
+<p>Search-only: enter a zone/npc/item below to reconstruct a drop table from your own kills, not a
+wiki guess. Per-zone and per-npc loot are already covered on each zone's own
+<a href="/zoneinfo/{{ game }}">Zone Info</a> page and each NPC's own <a href="/npcs/{{ game }}">NPC</a>
+page, so this stays a search rather than rendering the whole drop table every time. chance% = how many
+of your kills of that NPC (in that zone) actually dropped this item -- not every kill drops something,
+so this is drops divided by kills, not just a count of drops. Over 100% just means it can drop more
+than once per kill on average, not an error. avg qty is just an average (loot amounts aren't fixed
+tiers).</p>
+
+<form method="get" action="/loot/{{ game }}">
+  <input name="zone" placeholder="zone contains" value="{{ filters.zone }}">
+  <input name="npc" placeholder="npc contains" value="{{ filters.npc }}">
+  <input name="item" placeholder="item contains" value="{{ filters.item }}">
+  <button type="submit">Search</button>
+</form>
+
+{% if unresolved_zone_starts %}
+<div style="border:1px solid #c9a227; border-radius:6px; padding:0.8rem 1rem; margin-bottom:1rem;">
+  <strong>&#9888; {{ unresolved_zone_starts|length }} character(s) have activity logged before their
+  first zone was ever recorded -- confirm what zone they actually started in:</strong>
+  {% for u in unresolved_zone_starts %}
+  <form method="post" action="/zone-start/set" style="display:flex; gap:0.5rem; align-items:center; margin-top:0.5rem;">
+    <input type="hidden" name="character_id" value="{{ u.character_id }}">
+    <input type="hidden" name="next" value="/loot/{{ game }}">
+    <span style="min-width:220px;">{{ u.character_name }} <span style="opacity:0.7;">(earliest: {{ u.earliest_ts }})</span></span>
+    <input name="zone" placeholder="actual zone, e.g. The Steamfont Mountains" required style="width:280px;">
+    <input name="note" placeholder="note (optional)">
+    <button type="submit">Confirm</button>
+  </form>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if not rows %}
+<p>No loot data matching that search.</p>
+{% elif truncated %}
+<p style="opacity:0.8;">List truncated, please refine.</p>
+{% endif %}
+
+{% for item, item_rows in rows|groupby('item') %}
+<details>
+  <summary>{{ item }}</summary>
+  <table class="sortable">
+    <thead>
+      <tr><th>zone</th><th>npc</th><th>level</th><th>avg qty</th><th>chance %</th><th>drops</th></tr>
+    </thead>
+    <tbody>
+      {% for r in item_rows %}
+      <tr>
+        <td>
+          {% if r.zone == '(unknown zone)' %}{{ r.zone }}
+          {% else %}<a href="/zoneinfo/{{ game }}/detail?zone={{ r.zone|urlencode }}">{{ r.zone }}</a>{% endif %}
+        </td>
+        <td>
+          {% if r.npc == '(unknown npc)' %}{{ r.npc }}
+          {% else %}<a href="/npcs/{{ game }}/detail?npc={{ r.npc|urlencode }}">{{ r.npc }}</a>{% endif %}
+        </td>
+        <td>{{ r.level or '' }}</td>
+        <td>{{ r.avg_qty }}</td>
+        <td>{{ r.chance_pct if r.chance_pct is not none else '?' }}%</td>
+        <td>{{ r.drops }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</details>
+{% endfor %}
+{% endblock %}

@@ -1,0 +1,354 @@
+{% extends "base.html" %}
+{% block title %}Encounter Breakdown{% endblock %}
+{% block content %}
+<div id="breakdown-params" data-character="{{ filters.character }}" data-start-ts="{{ start_ts }}" data-stop-ts="{{ stop_ts or '' }}" data-merged="{{ 'yes' if merged else '' }}" hidden></div>
+{% if merged %}
+<h1>Encounter Breakdown -- {{ windows|length }} encounters merged</h1>
+<p style="opacity:0.8;">{{ duration_s }}s combined combat time (sum of each encounter's own duration, not wall-clock span).</p>
+<ul style="opacity:0.8; font-size:0.9rem;">
+  {% for w in windows %}
+  <li>{{ w.character }} -- {{ w.start_ts.replace("T", " ") }} to {{ (w.stop_ts or '(active)').replace("T", " ") }}{% if w.npc %} ({{ w.npc }} only){% endif %}</li>
+  {% endfor %}
+</ul>
+{% else %}
+<h1>Encounter Breakdown{% if filters.npc %} -- {{ filters.npc }} only{% endif %}</h1>
+<p>{{ filters.character }} -- {{ start_ts.replace("T", " ") }} to {{ stop_ts.replace("T", " ") }}
+-- {{ duration_s }}s total duration</p>
+{% endif %}
+
+{% macro heal_table(rows) %}
+<div class="scroll-frame">
+<table class="sortable">
+  <thead>
+    <tr>
+      <th>spell</th><th>casts</th><th>crit %</th><th>total heal</th>
+      <th>effective heal</th><th>overheal</th><th>efficiency %</th><th>hps</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.name }}</td>
+      <td>{{ r.casts }}</td>
+      <td>{{ r.crit_pct if r.crit_pct is not none else '' }}</td>
+      <td>{{ r.total_heal }}</td>
+      <td>{{ r.effective_heal }}</td>
+      <td>{{ r.overheal }}</td>
+      <td>{{ r.efficiency_pct if r.efficiency_pct is not none else '' }}</td>
+      <td>{{ r.hps }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endmacro %}
+
+{% if not merged %}
+<h2>DPS</h2>
+{% if not npcs %}
+<p>No combat data for this window.</p>
+{% endif %}
+{% endif %}
+
+{% macro attack_table(rows) %}
+<div class="scroll-frame">
+<table class="sortable">
+  <thead>
+    <tr>
+      <th>attack</th><th>total dmg</th><th>attempts</th><th>hit %</th><th>crit %</th><th>miss %</th>
+      <th>dodged %</th><th>parried %</th><th>blocked %</th><th>riposted %</th><th>resisted %</th><th>absorbed %</th>
+      <th>min dmg (hit)</th><th>avg dmg (hit)</th><th>max dmg (hit)</th>
+      <th>min dmg (crit)</th><th>avg dmg (crit)</th><th>max dmg (crit)</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.verb }}</td>
+      <td>{{ r.total_damage }}</td>
+      <td>{{ r.attempts }}</td>
+      <td>{{ r.hit_pct if r.hit_pct is not none else '' }}</td>
+      <td>{{ r.crit_pct if r.crit_pct is not none else '' }}</td>
+      <td>{{ r.miss_pct if r.miss_pct is not none else '' }}</td>
+      <td>{{ r.dodge_pct if r.dodge_pct is not none else '' }}</td>
+      <td>{{ r.parry_pct if r.parry_pct is not none else '' }}</td>
+      <td>{{ r.block_pct if r.block_pct is not none else '' }}</td>
+      <td>{{ r.riposte_pct if r.riposte_pct is not none else '' }}</td>
+      <td>{{ r.resist_pct if r.resist_pct is not none else '' }}</td>
+      <td>{{ r.absorb_pct if r.absorb_pct is not none else '' }}</td>
+      <td>{{ r.min_hit if r.min_hit is not none else '' }}</td>
+      <td>{{ r.avg_hit if r.avg_hit is not none else '' }}</td>
+      <td>{{ r.max_hit if r.max_hit is not none else '' }}</td>
+      <td>{{ r.min_crit if r.min_crit is not none else '' }}</td>
+      <td>{{ r.avg_crit if r.avg_crit is not none else '' }}</td>
+      <td>{{ r.max_crit if r.max_crit is not none else '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endmacro %}
+
+{% macro damage_totals_section(title, combatants) %}
+<h2>{{ title }}</h2>
+{% if not combatants %}
+<p style="opacity:0.8;">No {{ title|lower }} in this window.</p>
+{% else %}
+<div class="others-block" data-npc="__{{ title|lower }}__">
+  <button type="button" class="expand-all" style="margin-bottom:0.4rem;">expand all</button>
+  <div class="scroll-frame">
+  <table class="others-summary">
+    <thead>
+      <tr><th>combatant</th><th>total dmg</th><th>attempts</th><th>dps</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for c in combatants %}
+      <tr class="others-summary-row">
+        <td>{{ c.name }}</td>
+        <td>{{ c.total_damage }}</td>
+        <td>{{ c.attempts }}</td>
+        <td>{{ c.dps }}</td>
+        <td><button type="button" class="expand-one">expand</button></td>
+      </tr>
+      <tr class="others-detail-row" style="display:none;">
+        <td colspan="5">{{ attack_table(c.attacks) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+{% endmacro %}
+
+{% if merged %}
+{{ damage_totals_section("Outgoing", damage_totals.out) }}
+{{ damage_totals_section("Incoming", damage_totals['in']) }}
+{% endif %}
+
+{% if not merged %}
+{% for n in npcs %}
+<div style="border:1px solid var(--border); border-radius:6px; padding:0.8rem 1rem; margin-bottom:1.5rem;">
+
+  <h2 style="margin-top:0;">
+    {{ n.npc }}
+    <button type="button" class="npc-log-toggle" data-mob="{{ n.npc }}"
+      style="font-size:0.8rem; font-weight:400; margin-left:0.6rem;">show log</button>
+  </h2>
+  <div class="npc-log-block" style="display:none; max-height:320px; overflow-y:auto; font-family:monospace;
+    font-size:0.8rem; white-space:pre-wrap; background:#12141c; border:1px solid var(--border);
+    border-radius:4px; padding:0.5rem; margin:0 0 0.8rem 0;"></div>
+  <p style="opacity:0.8;">{{ start_ts.replace("T", " ") }} to {{ stop_ts.replace("T", " ") }} -- {{ duration_s }}s total duration</p>
+  <table style="margin-bottom:1rem;">
+    <tr><td style="opacity:0.7; padding-right:1rem;">damage done <strong>to</strong> {{ n.npc }}</td>
+        <td>melee: {{ n.melee_damage_to }}</td><td>spell: {{ n.spell_damage_to }}</td>
+        <td>total: {{ n.melee_damage_to + n.spell_damage_to }}</td></tr>
+    <tr><td style="opacity:0.7; padding-right:1rem;">damage done <strong>by</strong> {{ n.npc }} (to the group)</td>
+        <td>melee: {{ n.melee_damage_from }}</td><td>spell: {{ n.spell_damage_from }}</td>
+        <td>total: {{ n.melee_damage_from + n.spell_damage_from }}</td></tr>
+  </table>
+
+  {% if n.you %}
+  <h3>You</h3>
+  {% if n.you.out %}
+  <h4>Outgoing (You &rarr; {{ n.npc }}) -- {{ n.you.out_total }} total damage in {{ duration_s }}s ({{ n.you.out_dps }} dps)</h4>
+  {{ attack_table(n.you.out) }}
+  {% endif %}
+  {% if n.you['in'] %}
+  <h4>Incoming ({{ n.npc }} &rarr; You) -- {{ n.you.in_total }} total damage in {{ duration_s }}s ({{ n.you.in_dps }} dps)</h4>
+  {{ attack_table(n.you['in']) }}
+  {% endif %}
+  {% if not n.you.out and not n.you['in'] %}
+  <p style="opacity:0.7;">No direct combat with {{ n.npc }}.</p>
+  {% endif %}
+  {% endif %}
+
+  {% if n.others %}
+  <h3>{{ 'Everyone else' if n.you else 'Combatants' }}</h3>
+  <div class="others-block" data-npc="{{ n.npc }}">
+    <button type="button" class="expand-all" style="margin-bottom:0.4rem;">expand all</button>
+    <div class="scroll-frame">
+    <table class="others-summary">
+      <thead>
+        <tr><th>combatant</th><th>dmg out</th><th>dps out</th><th>dmg in</th><th>dps in</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for o in n.others %}
+        <tr class="others-summary-row">
+          <td>{{ o.combatant }}</td>
+          <td>{{ o.out_total }}</td>
+          <td>{{ o.out_dps }}</td>
+          <td>{{ o.in_total }}</td>
+          <td>{{ o.in_dps }}</td>
+          <td><button type="button" class="expand-one">expand</button></td>
+        </tr>
+        <tr class="others-detail-row" style="display:none;">
+          <td colspan="6">
+            {% if o.out %}
+            <h4>Outgoing ({{ o.combatant }} &rarr; {{ n.npc }})</h4>
+            {{ attack_table(o.out) }}
+            {% endif %}
+            {% if o['in'] %}
+            <h4>Incoming ({{ n.npc }} &rarr; {{ o.combatant }})</h4>
+            {{ attack_table(o['in']) }}
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+  {% endif %}
+
+</div>
+{% endfor %}
+{% endif %}
+
+<h2>Procs</h2>
+{% if not procs and not rune_instances %}
+<p style="opacity:0.8;">No proc triggers in this window.</p>
+{% else %}
+<table style="margin-bottom:1rem;">
+  {% for p in procs %}
+  <tr><td style="opacity:0.7; padding-right:1rem;">{{ p.proc }}</td>
+      <td>{{ p.triggers }} trigger(s)</td>
+      <td style="opacity:0.7;">-- {{ (p.triggers / (duration_s / 60))|round(2) if duration_s else 0 }}/min</td></tr>
+  {% endfor %}
+  {% for r in rune_instances %}
+  <tr><td style="opacity:0.7; padding-right:1rem;">{{ r.tier }}</td>
+      <td>{{ r.total }} points absorption{% if r.gain_count > 1 %} ({{ r.gain_count }} top-ups){% endif %}</td>
+      <td style="opacity:0.7;">
+        --
+        {%- if r.duration_s is not none %} {{ r.duration_s }}s uptime
+          {%- if r.ended_by == 'overwritten' %} (overwritten by a new rune){% endif -%}
+        {%- else %} still active{% endif -%}
+      </td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h2>Healing</h2>
+{% if not healers %}
+<p style="opacity:0.8;">No healing done in this window.</p>
+{% else %}
+<div class="others-block" data-npc="__healing__">
+  <button type="button" class="expand-all" style="margin-bottom:0.4rem;">expand all</button>
+  <div class="scroll-frame">
+  <table class="others-summary">
+    <thead>
+      <tr>
+        <th>healer</th><th>casts</th><th>crit %</th><th>total heal</th>
+        <th>effective heal</th><th>overheal</th><th>efficiency %</th><th>hps</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for h in healers %}
+      <tr class="others-summary-row">
+        <td>{{ h.name }}</td>
+        <td>{{ h.casts }}</td>
+        <td>{{ h.crit_pct if h.crit_pct is not none else '' }}</td>
+        <td>{{ h.total_heal }}</td>
+        <td>{{ h.effective_heal }}</td>
+        <td>{{ h.overheal }}</td>
+        <td>{{ h.efficiency_pct if h.efficiency_pct is not none else '' }}</td>
+        <td>{{ h.hps }}</td>
+        <td><button type="button" class="expand-one">expand</button></td>
+      </tr>
+      <tr class="others-detail-row" style="display:none;">
+        <td colspan="9">
+          {{ heal_table(h.spells) }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+<script>
+  // Direct log entries for one NPC's whole breakdown block, filtered to
+  // this window + that mob name -- same /api/encounters/log endpoint and
+  // lazy-fetch-once-then-cache pattern /encounters already uses for its
+  // per-mob log buttons.
+  const breakdownParamsEl = document.getElementById("breakdown-params");
+  const breakdownLogParams = {
+    character: breakdownParamsEl.dataset.character,
+    start_ts: breakdownParamsEl.dataset.startTs,
+    stop_ts: breakdownParamsEl.dataset.stopTs,
+  };
+  document.querySelectorAll(".npc-log-toggle").forEach((button) => {
+    const block = button.closest("h2").nextElementSibling;
+    let loaded = false;
+    button.addEventListener("click", async () => {
+      const opening = block.style.display === "none";
+      block.style.display = opening ? "" : "none";
+      button.textContent = opening ? "hide log" : "show log";
+      if (opening && !loaded) {
+        loaded = true;
+        block.textContent = "Loading...";
+        const params = { ...breakdownLogParams, mob: button.dataset.mob };
+        const res = await fetch(`/api/encounters/log?${new URLSearchParams(params)}`);
+        const rows = await res.json();
+        block.textContent = rows.length ? rows.map((r) => r.raw_line).join("\n") : "No log entries.";
+      }
+    });
+  });
+
+  // Summary rows are paired 1:1 with a hidden detail row right after them
+  // (for expand/collapse) -- the generic table.js sorter would sort every
+  // <tr> independently and scramble that pairing, so this table skips
+  // class="sortable" and gets its own sorter that always moves both rows
+  // of a pair together.
+  function makeSortablePaired(table) {
+    const headers = table.querySelectorAll("thead th");
+    headers.forEach((th, idx) => {
+      if (!th.textContent.trim()) return;
+      th.style.cursor = "pointer";
+      th.addEventListener("click", () => {
+        const tbody = table.querySelector("tbody");
+        const summaryRows = Array.from(tbody.querySelectorAll(".others-summary-row"));
+        const asc = th.dataset.sortDir !== "asc";
+        headers.forEach((h) => delete h.dataset.sortDir);
+        th.dataset.sortDir = asc ? "asc" : "desc";
+        summaryRows.sort((a, b) => {
+          const av = a.children[idx].textContent.trim();
+          const bv = b.children[idx].textContent.trim();
+          const an = parseFloat(av), bn = parseFloat(bv);
+          const cmp = (!isNaN(an) && !isNaN(bn) && av !== "" && bv !== "") ? an - bn : av.localeCompare(bv);
+          return asc ? cmp : -cmp;
+        });
+        summaryRows.forEach((row) => {
+          const detail = row.nextElementSibling;
+          tbody.appendChild(row);
+          tbody.appendChild(detail);
+        });
+      });
+    });
+  }
+  document.querySelectorAll(".others-summary").forEach(makeSortablePaired);
+
+  document.querySelectorAll(".others-block").forEach((block) => {
+    const expandAllBtn = block.querySelector(".expand-all");
+    const detailRows = block.querySelectorAll(".others-detail-row");
+    let allExpanded = false;
+
+    block.querySelectorAll(".expand-one").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const row = btn.closest("tr").nextElementSibling;
+        const opening = row.style.display === "none";
+        row.style.display = opening ? "" : "none";
+        btn.textContent = opening ? "collapse" : "expand";
+      });
+    });
+
+    expandAllBtn.addEventListener("click", () => {
+      allExpanded = !allExpanded;
+      detailRows.forEach((row) => { row.style.display = allExpanded ? "" : "none"; });
+      block.querySelectorAll(".expand-one").forEach((btn) => { btn.textContent = allExpanded ? "collapse" : "expand"; });
+      expandAllBtn.textContent = allExpanded ? "collapse all" : "expand all";
+    });
+  });
+</script>
+{% endblock %}
