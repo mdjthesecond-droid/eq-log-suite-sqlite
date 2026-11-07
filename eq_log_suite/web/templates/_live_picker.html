@@ -46,6 +46,13 @@
       &middot; {{ '{:,}'.format(st.event_count) }} event{{ '' if st.event_count == 1 else 's' }}
       {% if st.last_ts %}&middot; latest {{ st.last_ts[:19] }}{% endif %}
       &middot; loaded in {{ st.load_seconds }}s
+      <br>
+      {% set tl = picker.tailer %}
+      {% if tl and tl.following == st.path %}<span class="live-picker-recording">&#9679; Recording new lines from this log</span>
+      {% elif tl and tl.error %}<span class="live-picker-error">Not recording: {{ tl.error }}</span>
+      {% elif tl and tl.stopped %}<span class="live-picker-error">Recording stopped (see the web log) -- Load the log again to restart it.</span>
+      {% else %}<span class="live-picker-error">Not recording new lines -- Load the log to start.</span>{% endif %}
+      {% if tl and tl.overlay_error %}<span style="opacity:0.7;">(overlay unavailable: {{ tl.overlay_error }})</span>{% endif %}
     {% endif %}
   </div>
 </form>

@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from eq_log_suite import db, live_window
+from eq_log_suite import db, live_window, tailer_service
 from eq_log_suite.overlay import boxes as overlay_boxes
 from eq_log_suite.parsers.base import GameParser
 
@@ -3555,6 +3555,7 @@ def _picker_context(request: Request, error: str = "") -> dict:
         "logs": live_window.list_logs(),
         "last": live_window.last_selected(),
         "default_window": live_window.DEFAULT_WINDOW,
+        "tailer": tailer_service.current().status() if tailer_service.current() else None,
         "windows": live_window.WINDOWS,
         "error": error or request.query_params.get("picker_error", ""),
         "next": here,
@@ -3568,8 +3569,10 @@ def live_window_select(
 ):
     target = _safe_next(next)
     try:
-        live_window.select(log_path, window, character, server)
-    except (ValueError, OSError) as e:
+        state = live_window.select(log_path, window, character, server)
+        # ...and that's the log the in-app tailer follows from now on.
+        tailer_service.get().follow(state["path"])
+    except (ValueError, OSError, RuntimeError) as e:
         sep = "&" if "?" in target else "?"
         return RedirectResponse(f"{target}{sep}picker_error={quote(str(e))}", status_code=303)
     # Drop the page's own time filters -- they belonged to the old window.

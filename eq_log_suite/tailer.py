@@ -739,6 +739,13 @@ def main():
     ap = argparse.ArgumentParser(description="Live-tail all log_sources marked live=1.")
     ap.add_argument("--socket", default=DEFAULT_SOCKET_PATH)
     args = ap.parse_args()
+    from eq_log_suite.tailer_service import TailLock
+    lock = TailLock()
+    if not lock.acquire():
+        # The web app's in-app tailer (or another copy of this) is already
+        # recording -- two would record every line twice.
+        print("[tailer] another tailer is already running (the web app records the selected log itself) -- exiting.")
+        return
     enabled = db.enabled_games()
     roots = db.enabled_log_roots()
     print(f"[tailer] enabled games: {sorted(enabled)}")
