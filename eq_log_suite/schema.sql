@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS log_sources (
     last_byte_offset INTEGER NOT NULL DEFAULT 0,
     last_parsed_at TEXT NULL,
     last_rotated_at TEXT NULL,  -- UTC; see tailer.py's weekly rotation
-    live INTEGER NOT NULL DEFAULT 0
+    live INTEGER NOT NULL DEFAULT 0,
+    fingerprint TEXT NULL       -- hash of the file's first line, see coverage.py
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -154,7 +155,30 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT NULL
 );
 
+-- What's already been recorded, per character -- see coverage.py. One row
+-- per read pass over a log file (a tailer session, an import); a pass that
+-- continues a file at its saved offset extends that file's last row.
+CREATE TABLE IF NOT EXISTS recorded_ranges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    character_id INTEGER NOT NULL REFERENCES characters(id),
+    log_source_id INTEGER NOT NULL REFERENCES log_sources(id),
+    start_ts TEXT NOT NULL,
+    end_ts TEXT NOT NULL
+);
+
+-- The exact lines in each range's first and last second (hash + repeat
+-- count within that second), so a line in a boundary second is only
+-- skipped if that same line was really recorded already.
+CREATE TABLE IF NOT EXISTS range_edge_lines (
+    range_id INTEGER NOT NULL REFERENCES recorded_ranges(id),
+    ts TEXT NOT NULL,
+    line_hash TEXT NOT NULL,
+    occurrence INTEGER NOT NULL,
+    PRIMARY KEY (range_id, ts, line_hash, occurrence)
+);
+
 -- indexes
+CREATE INDEX IF NOT EXISTS idx_recorded_ranges_character ON recorded_ranges (character_id, start_ts);
 CREATE INDEX IF NOT EXISTS idx_game_ts ON events (game_id, ts);
 CREATE INDEX IF NOT EXISTS idx_char_ts ON events (character_id, ts);
 CREATE INDEX IF NOT EXISTS idx_event_type ON events (event_type);

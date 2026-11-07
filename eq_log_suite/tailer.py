@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from eq_log_suite import db, discovery, ingest
+from eq_log_suite import coverage, db, discovery, ingest
 from eq_log_suite.alerts import AlertEngine
 from eq_log_suite.parsers.registry import get_parser
 
@@ -411,6 +411,22 @@ async def tail_log_source(conn, log_source, broadcaster: OverlayBroadcaster):
               "treating it as a new file and reading from the start")
         offset = 0
         db.update_log_source_offset(conn, log_source_id, 0)
+    fp_now = coverage.fingerprint(f)
+    fp_saved = log_source.get("fingerprint")
+    if offset and fp_saved and fp_now and fp_now != fp_saved:
+        # Same name, different file (first line differs) -- the old log was
+        # moved away and a new one has since grown past the old offset, which
+        # the size check above can't see. Read it from the start.
+        print(f"[tailer] {path} is a different file than last time (first line changed) -- reading it from the start")
+        offset = 0
+        db.update_log_source_offset(conn, log_source_id, 0)
+    if fp_now and fp_now != fp_saved:
+        db.set_log_source_fingerprint(conn, log_source_id, fp_now)
+    # Resuming the same file at its saved offset needs no duplicate checks;
+    # reading a file from the start (new, replaced) checks every line against
+    # what's already recorded for this character -- see coverage.py.
+    recorder = coverage.Recorder(conn, character_id, log_source_id, continuing=offset > 0)
+    fingerprint_pending = fp_now is None
     try:
         prefix = f.read(offset)
         line_no = prefix.count(b"\n")
@@ -432,6 +448,8 @@ async def tail_log_source(conn, log_source, broadcaster: OverlayBroadcaster):
                 f = open(path, "rb")
                 last_rotated_at = wall_now
                 db.mark_log_source_rotated(conn, log_source_id, offset)
+                recorder = coverage.Recorder(conn, character_id, log_source_id, continuing=False)
+                fingerprint_pending = True
 
             mob_damage.prune(now)
 
@@ -469,6 +487,8 @@ async def tail_log_source(conn, log_source, broadcaster: OverlayBroadcaster):
                         f = open(path, "rb")
                         offset, line_no = 0, 0
                         db.update_log_source_offset(conn, log_source_id, 0)
+                        recorder = coverage.Recorder(conn, character_id, log_source_id, continuing=False)
+                        fingerprint_pending = True
                         continue
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
@@ -476,14 +496,27 @@ async def tail_log_source(conn, log_source, broadcaster: OverlayBroadcaster):
             offset += len(line_bytes)
             line = line_bytes.decode("utf-8", errors="replace").rstrip("\r\n")
             event = parser_cls.parse_line(line, line_no=line_no)
+            parsed_ts = parser_cls.parse_timestamp(line)
 
-            events_batch = [(0, event)] if event is not None else []
-            raw_batch = [(0, line_no, event.ts if event else None, line)]
-            ingest.insert_batch(conn, game_id, character_id, log_source_id, events_batch, raw_batch)
+            if fingerprint_pending:
+                with open(path, "rb") as g:
+                    fp = coverage.fingerprint(g)
+                if fp:
+                    db.set_log_source_fingerprint(conn, log_source_id, fp)
+                    fingerprint_pending = False
+
+            record = recorder.should_record(parsed_ts[0] if parsed_ts else None, line)
+            if record:
+                events_batch = [(0, event)] if event is not None else []
+                raw_batch = [(0, line_no, event.ts if event else None, line)]
+                recorder.flush()  # committed together with the line by insert_batch
+                ingest.insert_batch(conn, game_id, character_id, log_source_id, events_batch, raw_batch)
             db.update_log_source_offset(conn, log_source_id, offset)
             line_no += 1
 
-            if event is not None:
+            # A line that was already recorded (an old copy being re-read)
+            # is history, not something happening now -- no alerts/overlay.
+            if record and event is not None:
                 alert_engine.evaluate(event)
 
                 if event.event_type == "zone_change" and event.source_type == "you":

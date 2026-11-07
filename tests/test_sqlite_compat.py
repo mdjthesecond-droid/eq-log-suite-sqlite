@@ -68,7 +68,9 @@ def test_schema_splits_tables_from_indexes():
     db.apply_schema(c, include_indexes=False)
     count = lambda kind: c.execute(  # noqa: E731
         "SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name NOT LIKE 'sqlite_%'", (kind,)).fetchone()[0]
-    assert count("table") == 12 and count("index") == 0
+    import re
+    expected = len(re.findall(r"CREATE TABLE IF NOT EXISTS", db.SCHEMA_PATH.read_text()))
+    assert count("table") == expected and expected >= 11 and count("index") == 0, (count("table"), expected)
     db.apply_schema(c)
     assert count("index") >= 16
 

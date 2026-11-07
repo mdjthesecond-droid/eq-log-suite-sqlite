@@ -67,7 +67,21 @@ def apply_schema(raw_conn, include_indexes: bool = True):
     tables, sep, indexes = text.partition("\n-- indexes\n")
     if not sep:
         raise ValueError(f"{SCHEMA_PATH} is missing its '-- indexes' marker line")
-    raw_conn.executescript(tables + (indexes if include_indexes else ""))
+    raw_conn.executescript(tables)
+    # CREATE TABLE IF NOT EXISTS leaves an existing table alone, so a column
+    # added to schema.sql later has to be added to existing databases here.
+    for table, column, decl in _ADDED_COLUMNS:
+        have = {r[1] for r in raw_conn.execute(f"PRAGMA table_info({table})")}
+        if column not in have:
+            raw_conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    if include_indexes:
+        raw_conn.executescript(indexes)
+
+
+# (table, column, declaration) -- see apply_schema.
+_ADDED_COLUMNS = [
+    ("log_sources", "fingerprint", "TEXT NULL"),
+]
 
 
 @functools.lru_cache
@@ -146,6 +160,12 @@ def get_or_create_character(conn, game_id: int, name: str, server: str | None) -
         )
         conn.commit()
         return cur.lastrowid
+
+
+def set_log_source_fingerprint(conn, log_source_id: int, fp: str | None):
+    with conn.cursor() as cur:
+        cur.execute("UPDATE log_sources SET fingerprint=%s WHERE id=%s", (fp, log_source_id))
+    conn.commit()
 
 
 def get_or_create_log_source(conn, game_id: int, character_id: int, file_path: str, live: bool = False) -> dict:

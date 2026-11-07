@@ -9,10 +9,11 @@ tailer uses to catch up after a restart).
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
-from eq_log_suite import db, ingest
+from eq_log_suite import coverage, db, ingest
 from eq_log_suite.parsers.registry import detect_parser, get_parser
 
 BATCH_SIZE = 500
@@ -68,8 +69,27 @@ def import_file(path: str, game_code: str | None, character_name: str | None, se
 
     total_count = 0
     parsed_count = 0
+    skipped_count = 0
 
     with open(path, "rb") as f:
+        # Same name, different file? (EQ reuses one name per character +
+        # server.) A different first line than last time means the saved
+        # offset belongs to a file that's gone -- start over. See coverage.py.
+        fp_now = coverage.fingerprint(f)
+        fp_saved = log_source.get("fingerprint")
+        if start_offset and fp_saved and fp_now and fp_now != fp_saved:
+            print(f"{path} is a different file than last time (first line changed) -- reading it from the start.")
+            start_offset = 0
+        elif start_offset > os.fstat(f.fileno()).st_size:
+            print(f"{path} is smaller than its saved position -- reading it from the start.")
+            start_offset = 0
+        if fp_now and fp_now != fp_saved:
+            db.set_log_source_fingerprint(conn, log_source_id, fp_now)
+        # From the start: check every line against what this character
+        # already has recorded (so an archived/renamed copy of a log adds
+        # nothing twice). Resuming at the saved offset: already exact.
+        recorder = coverage.Recorder(conn, character_id, log_source_id, continuing=start_offset > 0)
+
         # Recompute the starting line number by counting newlines already
         # consumed on a prior run -- cheap relative to the parse itself.
         prefix = f.read(start_offset)
@@ -82,23 +102,33 @@ def import_file(path: str, game_code: str | None, character_name: str | None, se
 
         def flush():
             nonlocal events_batch, raw_batch
+            recorder.flush()  # committed together with the lines by insert_batch
             ingest.insert_batch(conn, game_id, character_id, log_source_id, events_batch, raw_batch)
             events_batch = []
             raw_batch = []
 
         for raw_bytes in f:
+            if not raw_bytes.endswith(b"\n"):
+                # A half-written last line (the game is mid-write): leave it,
+                # and the offset, for the next read -- consuming it here would
+                # split it into two broken lines.
+                break
             offset += len(raw_bytes)
             line = raw_bytes.decode("utf-8", errors="replace").rstrip("\r\n")
             total_count += 1
             idx = total_count
 
+            ts_only = parser_cls.parse_timestamp(line)
+            if not recorder.should_record(ts_only[0] if ts_only else None, line):
+                skipped_count += 1
+                line_no += 1
+                continue
             event = parser_cls.parse_line(line, line_no=line_no)
             if event is not None:
                 parsed_count += 1
                 events_batch.append((idx, event))
                 raw_batch.append((idx, line_no, event.ts, line))
             else:
-                ts_only = parser_cls.parse_timestamp(line)
                 raw_batch.append((idx, line_no, ts_only[0] if ts_only else None, line))
             line_no += 1
 
@@ -109,6 +139,8 @@ def import_file(path: str, game_code: str | None, character_name: str | None, se
         flush()
         db.update_log_source_offset(conn, log_source_id, offset)
 
+    if skipped_count:
+        print(f"  {skipped_count} line(s) skipped as already recorded (e.g. this is a copy of a log that was already read).")
     print(f"Imported {path}: {total_count} new lines read, {parsed_count} parsed into events (resumed from byte offset {start_offset}).")
 
 
