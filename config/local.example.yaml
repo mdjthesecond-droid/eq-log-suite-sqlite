@@ -4,9 +4,8 @@
 database:
   path: data/eqlogs.sqlite3   # relative to the project folder, or absolute
 
-# Folders the tailer auto-scans for new/rotated log files (new character or
-# new server). Scanned once at startup and every few minutes while the
-# tailer runs -- see eq_log_suite/discovery.py.
+# Folders whose eqlog_* files the Live picker's dropdown lists (Browse can
+# open a log from anywhere else). Nothing is read until you select a log.
 log_roots:
   eql: /home/myself/eql/Logs
   eq: /home/myself/eq/Logs

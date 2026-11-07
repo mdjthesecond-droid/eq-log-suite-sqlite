@@ -1,39 +1,29 @@
-"""Live log tailer: polls every log_sources row marked live=TRUE, parses new
-lines as they're appended, writes them to the database via the same path the bulk
-importer uses, runs the alert engine on each parsed event, and broadcasts
-live DPS/hit%/crit% snapshots + alert reactions to any connected overlay
-process over a local Unix socket.
+"""The per-file tailing loop: follows one log as it's appended to, writes
+new lines to the database via the same path the importer uses (with the
+same duplicate checks -- coverage.py), runs the alert engine on each parsed
+event, and broadcasts live DPS/hit%/crit% snapshots + alert reactions to
+any connected overlay process over a local Unix socket.
 
-Usage:
-    python -m eq_log_suite.tailer
-
-Add a file to live-tail with:
-    python -m eq_log_suite.importer <path> --live
-(this also does the initial historical catch-up import).
+It runs inside the web app (tailer_service.py), following whichever log is
+selected in the Live picker -- there's no separate tailer to start and no
+folder scanning. tail_log_source() is the loop itself.
 """
 
-import argparse
 import asyncio
 import calendar
 import json
 import os
-import signal
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from eq_log_suite import coverage, db, discovery, ingest
+from eq_log_suite import coverage, db, ingest
 from eq_log_suite.alerts import AlertEngine
 from eq_log_suite.parsers.registry import get_parser
 
 POLL_INTERVAL = 0.25
 DEFAULT_SOCKET_PATH = "/tmp/eq_log_suite_overlay.sock"
-# Re-scan for new log files this often. Cheap (a folder listing plus one
-# small query), and it's how a log that appears after the tailer started
-# -- the game launched later, or /log turned on mid-session -- gets picked
-# up, so it needs to be seconds, not minutes.
-DISCOVERY_INTERVAL_SECONDS = 5
 # While idle at the end of a log, how often to check whether the path now
 # points at a different file than the one open (see _replaced).
 FILE_IDENTITY_CHECK_SECONDS = 2
@@ -48,10 +38,6 @@ def _replaced(path, f) -> bool:
         return False
     cur = os.fstat(f.fileno())
     return (st.st_dev, st.st_ino) != (cur.st_dev, cur.st_ino)
-# The web UI's "rescan now" button sends SIGUSR1 to this PID to wake the
-# discovery loop immediately instead of waiting for the next timer tick --
-# see eq_log_suite.web.app's /import/rescan route.
-PID_PATH = Path(__file__).resolve().parent.parent / "logs" / "tailer.pid"
 
 # Log rotation, to keep an actively-tailed eqlog file from growing unbounded
 # over a long-running character. EQ doesn't hold the log file open for the
@@ -593,11 +579,9 @@ async def tail_log_source(conn, log_source, broadcaster: OverlayBroadcaster):
 
 
 async def _tail_log_source_isolated(conn, log_source, broadcaster: OverlayBroadcaster):
-    """Runs tail_log_source but keeps a crash (missing file, permission
-    error, whatever) local to this one source instead of taking down every
-    other game's tailing via asyncio.gather -- see the enabled_games check
-    in main_async for the normal way a defunct source is kept out of this
-    list entirely; this is the backstop for whatever still gets in."""
+    """Runs tail_log_source, turning a crash (file deleted, permission
+    error, whatever) into a logged message instead of an unhandled task
+    error -- the picker then shows recording as stopped (tailer_service)."""
     try:
         await tail_log_source(conn, log_source, broadcaster)
     except Exception as e:
@@ -616,140 +600,11 @@ def _character_name_for(conn, character_id: int) -> str:
         return cur.fetchone()["name"]
 
 
-async def discovery_loop(eql_root, eq_root, broadcaster, running_log_source_ids, rescan_event: asyncio.Event):
-    """Periodically re-scans the EQL/EQ log folders for new or rotated files
-    (a new character or a new server) and starts tailing them without a
-    restart. Also wakes up immediately (instead of waiting for the next
-    timer tick) whenever rescan_event is set -- see trigger_rescan()/SIGUSR1
-    handling below."""
-    while True:
-        try:
-            await asyncio.wait_for(rescan_event.wait(), timeout=DISCOVERY_INTERVAL_SECONDS)
-        except asyncio.TimeoutError:
-            pass
-        rescan_event.clear()
-
-        try:
-            new_sources = discovery.scan_and_import(eql_root, eq_root)
-            # Plus already-known live logs that exist but aren't being
-            # tailed -- a file that was missing at startup and has come
-            # back (same name), which scan_and_import skips as "tracked".
-            conn = db.get_connection()
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT * FROM log_sources WHERE live=1")
-                    idle = [ls for ls in cur.fetchall()
-                            if ls["id"] not in running_log_source_ids and os.path.isfile(ls["file_path"])]
-            finally:
-                conn.close()
-            new_sources = list(new_sources) + [ls for ls in idle if ls["id"] not in {n["id"] for n in new_sources}]
-        except Exception as e:
-            print(f"[tailer] discovery scan failed: {type(e).__name__}: {e}")
-            continue
-        for log_source in new_sources:
-            if log_source["id"] in running_log_source_ids:
-                continue
-            print(f"[tailer] discovered new log source: {log_source['file_path']}")
-            running_log_source_ids.add(log_source["id"])
-            task_conn = db.get_connection()
-            asyncio.create_task(_tail_log_source_isolated(task_conn, log_source, broadcaster))
-
-
-async def main_async(
-    socket_path: str,
-    eql_root: str | None,
-    eq_root: str | None = None,
-    enabled_games: set[str] | None = None,
-):
-    PID_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PID_PATH.write_text(str(os.getpid()))
-
-    rescan_event = asyncio.Event()
-    asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1, rescan_event.set)
-
-    if eql_root or eq_root:
-        print("[tailer] scanning for new/rotated log files...")
-        discovery.scan_and_import(eql_root or "", eq_root or "")
-
-    conn = db.get_connection()
-    with conn.cursor() as cur:
-        # Restrict to enabled_games even though the row says live=1 -- a
-        # game that's uninstalled or just not being played shouldn't get
-        # tailed just because a stale row says so, and shouldn't need its
-        # folder to exist either (see [[project_tailer_no_db_reconnect]] and
-        # the FileNotFoundError incident this was added for: one dead game's
-        # missing log directory took down tailing for every other game too).
-        if enabled_games:
-            placeholders = ",".join(["%s"] * len(enabled_games))
-            cur.execute(
-                "SELECT ls.* FROM log_sources ls JOIN games g ON ls.game_id=g.id "
-                f"WHERE ls.live=1 AND g.code IN ({placeholders})",
-                tuple(enabled_games),
-            )
-        else:
-            cur.execute("SELECT * FROM log_sources WHERE live=1")
-        live_sources = cur.fetchall()
-    # This connection isn't reused for anything else -- each tail task below
-    # gets its own -- so end its transaction and hand it back to the pool
-    # rather than letting it sit open (and holding a metadata lock) for the
-    # rest of this forever-running coroutine's life.
-    conn.commit()
-    conn.close()
-
-    # Live rows whose file is gone (moved to an archive, deleted) can't be
-    # tailed -- skip them here instead of starting a task that just dies.
-    missing = [ls for ls in live_sources if not os.path.isfile(ls["file_path"])]
-    for ls in missing:
-        print(f"[tailer] skipping {ls['file_path']}: file no longer exists")
-    live_sources = [ls for ls in live_sources if ls not in missing]
-
-    if not live_sources and not (eql_root or eq_root):
-        print(
-            "No log files to tail and no log_roots configured to watch for new ones -- "
-            "set log_roots in config/local.yaml."
-        )
-        return
-    if not live_sources:
-        # Normal for a fresh install, or when the tailer starts before the
-        # game has written a log: keep running and let discovery_loop pick
-        # the log up the moment it appears.
-        print(f"[tailer] no log files yet -- watching for new ones every {DISCOVERY_INTERVAL_SECONDS}s")
-
-    broadcaster = OverlayBroadcaster()
-    await broadcaster.start(socket_path)
-    print(f"[tailer] overlay socket listening at {socket_path}")
-
-    # Each tailed file gets its own connection -- connections aren't
-    # safe to share across concurrent asyncio tasks doing blocking I/O.
-    running_log_source_ids = {ls["id"] for ls in live_sources}
-    tasks = []
-    for log_source in live_sources:
-        task_conn = db.get_connection()
-        tasks.append(asyncio.create_task(_tail_log_source_isolated(task_conn, log_source, broadcaster)))
-
-    if eql_root or eq_root:
-        tasks.append(asyncio.create_task(
-            discovery_loop(eql_root or "", eq_root or "", broadcaster, running_log_source_ids, rescan_event)
-        ))
-
-    await asyncio.gather(*tasks)
-
-
 def main():
-    ap = argparse.ArgumentParser(description="Live-tail all log_sources marked live=1.")
-    ap.add_argument("--socket", default=DEFAULT_SOCKET_PATH)
-    args = ap.parse_args()
-    from eq_log_suite.tailer_service import TailLock
-    lock = TailLock()
-    if not lock.acquire():
-        # The web app's in-app tailer (or another copy of this) is already
-        # recording -- two would record every line twice.
-        print("[tailer] another tailer is already running (the web app records the selected log itself) -- exiting.")
-        return
-    enabled = db.enabled_games()
-    roots = db.enabled_log_roots()
-    print(f"[tailer] enabled games: {sorted(enabled)}")
-    asyncio.run(main_async(args.socket, roots.get("eql"), roots.get("eq"), enabled))
+    # The tailer runs inside the web app now, following whichever log is
+    # selected in the Live picker (see tailer_service.py).
+    print("The tailer runs inside the web app now: start it with bin/start-web.sh, open "
+          "http://localhost:8000/encounters and select your log -- that records it and follows it.")
 
 
 if __name__ == "__main__":

@@ -207,10 +207,8 @@ def _identity(path: str) -> dict:
         character_id = db.get_or_create_character(
             kb, game_id, guess_character_from_filename(path) or "Unknown", guess_server_from_filename(path)
         )
-        # Registered so the window's rows have something to point at. Not
-        # marked live and (for a file outside log_roots, e.g. one opened via
-        # Browse) never picked up by discovery, so this doesn't make the
-        # tailer start importing it.
+        # Registered so the window's rows have something to point at (the
+        # selection records it right after).
         source = db.get_or_create_log_source(kb, game_id, character_id, path)
         return {"log_source_id": source["id"], "game_id": game_id, "character_id": character_id,
                 "game_code": parser.game_code}

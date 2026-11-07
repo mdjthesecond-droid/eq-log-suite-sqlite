@@ -36,7 +36,7 @@ def config() -> dict:
 
 
 def enabled_games() -> set[str]:
-    """Game codes the tailer/discovery should actually touch, from config's
+    """Game codes whose log folders the picker lists, from config's
     `enabled_games` list -- lets a game's log_roots entry (and any log_sources
     rows already recorded for it) stay in place while uninstalled or just not
     being played right now, without either being auto-discovered or crashing
@@ -47,8 +47,8 @@ def enabled_games() -> set[str]:
 
 
 def enabled_log_roots() -> dict[str, str]:
-    """log_roots filtered down to enabled_games -- the roots discovery/the
-    tailer should actually scan."""
+    """log_roots filtered down to enabled_games -- the folders the picker's
+    dropdown lists logs from."""
     roots = config().get("log_roots") or {}
     enabled = enabled_games()
     return {code: path for code, path in roots.items() if code in enabled}

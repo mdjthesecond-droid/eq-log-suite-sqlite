@@ -3753,7 +3753,7 @@ def import_form(request: Request):
 @app.post("/import", response_class=HTMLResponse)
 def import_run(
     request: Request, path: str = Form(...), game: str = Form("auto"),
-    character: str = Form(""), server: str = Form(""), live: bool = Form(False),
+    character: str = Form(""), server: str = Form(""),
 ):
     import subprocess
 
@@ -3762,8 +3762,6 @@ def import_run(
         cmd += ["--character", character]
     if server:
         cmd += ["--server", server]
-    if live:
-        cmd.append("--live")
     proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(PROJECT_ROOT))
 
     conn = db.get_connection()
@@ -3776,51 +3774,4 @@ def import_run(
     return templates.TemplateResponse(request, "import.html", {
         "sources": sources,
         "result": {"stdout": proc.stdout, "stderr": proc.stderr, "returncode": proc.returncode},
-    })
-
-
-@app.post("/import/rescan", response_class=HTMLResponse)
-def import_rescan(request: Request):
-    import os
-    import signal
-
-    from eq_log_suite import discovery
-    from eq_log_suite.tailer import PID_PATH
-
-    log_roots = db.enabled_log_roots()
-    new_sources = discovery.scan_and_import(
-        log_roots.get("eql", ""), log_roots.get("eq", "")
-    )
-
-    tailer_notified = False
-    tailer_error = None
-    try:
-        pid = int(PID_PATH.read_text().strip())
-        os.kill(pid, signal.SIGUSR1)
-        tailer_notified = True
-    except FileNotFoundError:
-        tailer_error = "Tailer isn't running (no PID file) -- start it before rescanning to actually live-tail anything new."
-    except (ValueError, ProcessLookupError):
-        tailer_error = "Tailer's PID file is stale (process not running) -- restart the tailer."
-
-    conn = db.get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM log_sources")
-            sources = cur.fetchall()
-    finally:
-        conn.close()
-
-    if new_sources:
-        message = f"Found and imported {len(new_sources)} new file(s): " + ", ".join(s["file_path"] for s in new_sources)
-    else:
-        message = "No new files found."
-    if tailer_notified:
-        message += " Tailer notified -- it'll start live-tailing anything new within a couple seconds."
-    elif tailer_error:
-        message += f" {tailer_error}"
-
-    return templates.TemplateResponse(request, "import.html", {
-        "sources": sources,
-        "result": {"stdout": message, "stderr": "", "returncode": 0},
     })

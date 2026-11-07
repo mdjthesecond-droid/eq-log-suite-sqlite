@@ -150,9 +150,8 @@ def main():
     ap.add_argument("--game", default="auto", help="eql | eq | auto (default: auto-detect)")
     ap.add_argument("--character", default=None)
     ap.add_argument("--server", default=None)
-    ap.add_argument("--live", action="store_true", help="mark this log_source for live tailing")
     args = ap.parse_args()
-    import_file(args.path, args.game, args.character, args.server, mark_live=args.live)
+    import_file(args.path, args.game, args.character, args.server)
 
 
 if __name__ == "__main__":

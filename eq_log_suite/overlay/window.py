@@ -6,7 +6,7 @@ resets when combat ends, plus any alert reactions pushed by the tailer.
 Evolved from ../../overlay_hello_world.py -- same transparency/click-through/
 always-on-top/no-focus-stealing setup (X11 + KWin compositor).
 
-Run (after `python -m eq_log_suite.tailer` is already running):
+Run (with the web app running and a log selected -- its in-app tailer feeds this):
     python -m eq_log_suite.overlay.window
 """
 

@@ -14,7 +14,7 @@ alerts (different rules/sources, keyed by "key" in the broadcast) are
 joined into one line with " | " -- a re-fire of the *same* key (e.g. a
 refreshed buff) replaces its own entry in place rather than duplicating.
 
-Run (after `python -m eq_log_suite.tailer` is already running):
+Run (with the web app running and a log selected -- its in-app tailer feeds this):
     python -m eq_log_suite.overlay.mangohud_writer
 """
 

@@ -10,8 +10,8 @@ background thread, so the web app stays responsive while it blocks on
 database writes.
 
 Only one tailer may follow logs at a time, in any process: two would each
-record every line. A lock file (data/tailer.lock) enforces that; the
-standalone `python -m eq_log_suite.tailer` takes the same lock.
+record every line. A lock file (data/tailer.lock) enforces that, across
+copies of the app too.
 """
 
 import asyncio
@@ -84,8 +84,8 @@ class TailerService:
         if self.thread:
             return
         if not self._lock.acquire():
-            self.error = ("Another tailer is already running (e.g. bin/start-tailer.sh) -- stop it "
-                          "(bin/stop-all.sh) so this app can record. Two would record every line twice.")
+            self.error = ("Another copy of the app is already recording -- stop it (bin/stop-all.sh) "
+                          "so this one can. Two would record every line twice.")
             raise RuntimeError(self.error)
         ready = threading.Event()
 

@@ -81,9 +81,10 @@ document.querySelectorAll('.rotation-form select[name=mode]').forEach(function(s
 <h2>While playing</h2>
 <ul>
   <li><a href="/live">Live</a> -- current zone, active encounter DPS/hit%/crit%, and the last 40 encounters, updating as the tailer parses new lines.</li>
-  <li><a href="/import">Import</a> a historical log file (or mark one for live tailing), or trigger a rescan for new/rotated logs.</li>
+  <li><a href="/import">Import</a> a log file into the database by path (the picker on Encounters does this too, when you select a log).</li>
   <li><a href="/alerts">Alerts</a> -- create/edit trigger rules (regex or field conditions) and reactions.</li>
 </ul>
-<p>Use the "EQ Log Suite - Tailer" desktop launcher before playing (or <code>python -m eq_log_suite.tailer</code> directly).
-The "EQ Log Suite - Overlay" launcher also starts the in-game overlay window, if you want it anyway.</p>
+<p>Start the app (<code>bin/start-web.sh</code>) -- before or after the game, either works -- then select your
+log in the picker on <a href="/encounters">Encounters</a>. Selecting it is what records it and keeps following it.
+The overlay launchers also start the in-game overlay, if you want it.</p>
 {% endblock %}

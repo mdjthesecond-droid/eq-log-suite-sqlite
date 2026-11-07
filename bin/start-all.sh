@@ -11,5 +11,5 @@
 set -e
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# start-overlay-native.sh starts the web app (which does the tailing) too.
 "$PROJECT_DIR/bin/start-overlay-native.sh"
-"$PROJECT_DIR/bin/start-web.sh"

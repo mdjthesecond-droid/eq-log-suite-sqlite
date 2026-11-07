@@ -39,21 +39,24 @@ cp config/local.example.yaml config/local.yaml
 
 That's it -- no database server. The database is one file
 (`data/eqlogs.sqlite3` by default, gitignored), created with all its tables
-the first time anything opens it. To back it up, stop the tailer and copy
+the first time anything opens it. To back it up, stop the app and copy
 that file.
 
-**Starting fresh vs. importing old logs.** By default, the first time the
-tailer sees a log file it imports the whole thing. To record only from now
-on instead (e.g. after a big game patch, so old play doesn't mix in), run
-this once on the new, empty database *before* first starting the tailer:
+**Recording is manual: you choose the log.** Start the app (before or after
+the game -- either works) and select your log in the picker on
+`/encounters`. Selecting a log is the one thing that records anything:
 
-```bash
-.venv/bin/python -m eq_log_suite.discovery --start-at-end
-```
+- it's read into the database -- the whole file the first time, only
+  what's new after that, and never a line that's already recorded, even
+  from a renamed or archived copy (`eq_log_suite/coverage.py`);
+- it's loaded into the Live view over the time window you picked
+  (now / 12h / 24h / 3 days / 1 week / all time);
+- the app follows it, recording new lines as the game writes them.
 
-It registers every current log file at its current end. Files that show up
-later (a new character or server) are still imported in full, since
-everything in them is new.
+The app starts empty every launch and waits for a selection (the last log
+is pre-selected in the dropdown). It never scans folders on its own. The
+log itself doesn't say whose it is, so the picker shows the character and
+server guessed from the filename -- correct them for a renamed copy.
 
 The code's SQL is written in MariaDB's dialect (this project's original
 database) and translated as it runs -- see `eq_log_suite/sqlite_compat.py`.
@@ -62,18 +65,17 @@ That includes what you type into `/query`, so either dialect works there.
 
 ## Everyday use -- launching manually or via desktop launchers
 
-The simplest path is the shell scripts in `bin/` (`start-tailer.sh`,
-`start-overlay.sh`, `start-mangohud-alerts.sh`, `start-web.sh`,
-`stop-all.sh`). All are safe to re-run -- they check what's already running
-before starting anything new. Logs from each go to `logs/tailer.log`,
-`logs/overlay.log`, `logs/mangohud_alerts.log`, `logs/web.log`.
+The simplest path is the shell scripts in `bin/` (`start-web.sh`,
+`start-overlay.sh`, `start-mangohud-alerts.sh`, `stop-all.sh`). All are safe
+to re-run -- they check what's already running before starting anything
+new. Logs from each go to `logs/web.log`, `logs/overlay.log`,
+`logs/mangohud_alerts.log`.
 
-- **Tailer** (`start-tailer.sh`) -- starts just the live tailer. This is the
-  normal one to run before you play.
-- **Web UI** (`start-web.sh`) -- starts the web server (if not already
-  running) at http://localhost:8000. This is where you actually watch
-  things live (`/live`, `/zones`) -- see below for why.
-- **Overlay** (`start-overlay.sh`) -- starts the tailer plus the in-game
+- **App** (`start-web.sh`) -- starts the app (if not already running) at
+  http://localhost:8000 and opens it. This is the normal one to run when you
+  play: select your log on `/encounters` and it records and follows it --
+  the tailer runs inside the app, there's nothing separate to start.
+- **Overlay** (`start-overlay.sh`) -- starts the app plus the in-game
   overlay window. On Linux with a compositor like KWin, a focused
   fullscreen game typically gets its own stacking layer above ordinary
   "always on top" windows, so a plain GTK/Qt overlay window like this one
@@ -82,8 +84,8 @@ before starting anything new. Logs from each go to `logs/tailer.log`,
   limitation, not something fixable from app settings like
   `WindowsBlockCompositing` -- the real fix (below) is graphics-API-level
   overlay injection, same approach as MangoHud/Steam's own overlay.
-- **Stop** (`stop-all.sh`) -- stops the tailer, overlay, MangoHud alert
-  writer, and web UI, whichever of them are running.
+- **Stop** (`stop-all.sh`) -- stops the app (and with it the tailer), the
+  overlay, and the MangoHud alert writer, whichever of them are running.
 
 If you'd like desktop-launcher entries (e.g. KDE's application menu) instead
 of running scripts from a terminal, create `.desktop` files in
@@ -145,7 +147,7 @@ Setup (one-time):
    in the GUI. Re-add the two pairs above after any GUI-driven edit.
 
 Everyday use: `bin/start-mangohud-alerts.sh` instead of the regular Overlay
-launcher. It starts the tailer (if not already running) plus
+launcher. It starts the app (if not already running -- select your log in it) plus
 `eq_log_suite/overlay/mangohud_writer.py`, which listens on the same
 alert-broadcast socket the GTK overlay uses and writes:
 - the live DPS/hit%/crit% snapshot to `logs/mangohud_dps.txt`, refreshed
@@ -165,31 +167,17 @@ per-message-colored annotations, this shows one line per slot: whatever
 fired most recently. Fine for "something just happened," not a substitute
 for the richer overlay if you're ever in windowed mode.
 
-## New/rotated log files (new character, new server)
+## New log files (new character, new server, a fresh log)
 
-This is automatic -- nothing to do manually. The tailer scans the folders
-listed under `log_roots` in `config/local.yaml`, restricted to whichever
-game codes are listed under `enabled_games` there (normally just whichever
-game you're currently playing), once at startup and every 5 minutes while
-it runs. A game left out of `enabled_games` is never touched -- its folder
-can be missing entirely -- and any files not already tracked get imported
-and considered for live-tailing automatically (see `eq_log_suite/discovery.py`).
+Nothing automatic: when you play a different character or server, or start
+a fresh log, select that log in the picker. The dropdown lists the `eqlog_*`
+files in the folders under `log_roots` (for the games in `enabled_games`),
+rotated copies included; Browse opens any `.txt` from anywhere else.
 
-Only one file is kept "live" per character at a time, resolved by which of
-that character's known files has the most recent modification time -- i.e.
-whichever one the game is actually writing to right now, so a rotated log
-never leaves a stale file being tailed. Different servers are always
-separate characters (and so separately live) even under the same character
-name, since server-specific rulesets can affect combat.
-
-To import a file without waiting for the next scan (or to bulk-backfill
-history without tailing it), the manual path still works:
-
-```bash
-.venv/bin/python -m eq_log_suite.importer <path-to-log-file> --live   # omit --live to backfill only
-```
-
-Both auto-detect which game a file is from.
+EQ reuses one filename per character + server, so when an old log is moved
+away and a new one starts under the same name, the app tells them apart by
+their first line and reads the new one from the start -- nothing skipped,
+nothing recorded twice.
 
 ## Extending to a new game
 
