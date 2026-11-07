@@ -236,6 +236,33 @@ def test_only_history_is_stored_and_visits_are_summarized():
                          ("spell", "Frost Breath"): (0, 1, 415)}, abilities
 
 
+def test_eql_task_rewards_and_repeats():
+    # Real EQL lines (2026-11-07, Kerra Isle): the reward names no task -- it's
+    # the one updated in the same second -- and a repeatable task's reward and
+    # next pickup share a second, so only line order separates the runs.
+    d = TMP / "tasks"
+    d.mkdir()
+    log = d / "eqlog_Golf_s1.txt"
+    log.write_text("".join([
+        L(0, "You have entered Kerra Isle."),
+        L(1, "You have been assigned the task 'Something is Wrrrong'."),
+        L(5, "You have slain a kerran `amir!"),
+        L(5, "Your task 'Something is Wrrrong' has been updated."),
+        L(9, "You offered 1 Desecrated Kejaar Totem to The Kerran Sha`rr."),
+        L(10, "Your task 'Something is Wrrrong' has been updated."),
+        L(10, "You have been given: Hamed's Ring of Tears"),
+        L(10, "You have been assigned the task 'Something is Wrrrong'."),
+        L(20, "Your task 'Something is Wrrrong' has been updated."),
+        L(20, "You have been given: Hamed's Ring of Tears"),
+    ]), newline="")
+    import_file(str(log), "eql", None, None)
+    from eq_log_suite.web import app
+    runs = sorted((r for r in app._compute_tasks("eql", character="Golf")), key=lambda r: r["assigned_at"])
+    got = [(r["assigned_at"], r["reward_at"], r["reward_item"], len(r["updates"])) for r in runs]
+    assert got == [(BASE + timedelta(seconds=1), BASE + timedelta(seconds=10), "Hamed's Ring of Tears", 2),
+                   (BASE + timedelta(seconds=10), BASE + timedelta(seconds=20), "Hamed's Ring of Tears", 1)], got
+
+
 def test_copy_of_same_log_adds_no_facts():
     before = ([dict(r) for r in facts_rows("mob_facts")], [dict(r) for r in facts_rows("loot_facts")],
               [dict(r) for r in facts_rows("ground_spawn_facts")],

@@ -480,7 +480,12 @@ def _correlate_task_updates(game, character=""):
             cur.execute(
                 "SELECT ev.character_id, ev.ts, ev.line_no, ev.event_type, ev.target_name, ev.amount "
                 "FROM events ev JOIN games g ON ev.game_id=g.id JOIN characters c ON ev.character_id=c.id "
-                f"WHERE (ev.event_type='loot' OR (ev.event_type='death' AND ev.source_name='You')) {inner_where}",
+                # EQ Legends adds two more, both confirmed real (2026-11-07): a
+                # completed trade (a turn-in -- "You complete the trade with
+                # X.") and the pickup itself (steps you'd already done
+                # complete on the spot, in a burst right after it).
+                f"WHERE (ev.event_type IN ('loot','trade_complete','task_assigned') "
+                f"OR (ev.event_type='death' AND ev.source_name='You')) {inner_where}",
                 inner_params,
             )
             triggers = cur.fetchall()
@@ -492,13 +497,18 @@ def _correlate_task_updates(game, character=""):
         triggers_by_key.setdefault((t["character_id"], t["ts"]), []).append(t)
 
     for u in updates:
-        candidates = triggers_by_key.get((u["character_id"], u["ts"]), [])
+        candidates = [t for t in triggers_by_key.get((u["character_id"], u["ts"]), [])
+                      if t["event_type"] != "task_assigned" or t["target_name"] == u["task"]]
         if not candidates:
             u["trigger"] = None
             continue
         best = min(candidates, key=lambda t: abs(t["line_no"] - u["line_no"]))
         if best["event_type"] == "death":
             u["trigger"] = f'slain {best["target_name"]}'
+        elif best["event_type"] == "trade_complete":
+            u["trigger"] = f'turned in to {best["target_name"]}'
+        elif best["event_type"] == "task_assigned":
+            u["trigger"] = "done on pickup"
         else:
             qty = best["amount"] or 1
             u["trigger"] = f'looted {best["target_name"]}' if qty == 1 else f'looted {qty} {best["target_name"]}'
@@ -536,8 +546,8 @@ def _compute_tasks(game, character="", task="", npc="", zone=""):
             # task/npc/zone filter, or a narrow search could cut a window
             # short and misattach an update to the wrong assignment).
             cur.execute(
-                "SELECT ev.character_id AS character_id, ev.ts AS assigned_at, c.name AS character_name, "
-                "ev.target_name AS task "
+                "SELECT ev.character_id AS character_id, ev.ts AS assigned_at, ev.line_no, "
+                "c.name AS character_name, ev.target_name AS task "
                 "FROM events ev JOIN games g ON ev.game_id=g.id JOIN characters c ON ev.character_id=c.id "
                 f"WHERE ev.event_type='task_assigned' {inner_where}",
                 inner_params,
@@ -553,7 +563,8 @@ def _compute_tasks(game, character="", task="", npc="", zone=""):
             npc_dialogue_rows = cur.fetchall()
 
             cur.execute(
-                "SELECT ev.character_id, ev.ts, ev.target_name AS task "
+                "SELECT ev.character_id, ev.ts, ev.line_no, ev.target_name AS task, "
+                "JSON_UNQUOTE(JSON_EXTRACT(ev.extra,'$.item')) AS item "
                 "FROM events ev JOIN games g ON ev.game_id=g.id JOIN characters c ON ev.character_id=c.id "
                 f"WHERE ev.event_type='task_reward' {inner_where}",
                 inner_params,
@@ -581,27 +592,40 @@ def _compute_tasks(game, character="", task="", npc="", zone=""):
         i = bisect.bisect_right(npc_ts_by_char[character_id], ts) - 1
         return pairs[i][1] if i >= 0 else None
 
-    # reward_at: nearest task_reward.ts at/after assigned_at, matched on
-    # (character_id, task name) -- same match the old correlated subquery
-    # used (r.target_name=ev.target_name AND r.ts>=ev.ts), just resolved
-    # once here instead of per row.
-    reward_ts_by_key: dict = {}
+    # reward: the first task_reward for the same (character, task) after the
+    # assignment and before that task's next assignment.
+    # Positions are (ts, line_no), not ts alone: a repeatable task's reward
+    # and its next pickup land in the same second (confirmed real, EQL's
+    # "Something is Wrrrong": update, reward, then assigned again), and only
+    # line order says which run the reward and that update belong to.
+    def pos(ts, line_no):
+        return (ts, line_no or 0)
+
+    rewards_by_key: dict = {}
     for r in reward_rows:
-        reward_ts_by_key.setdefault((r["character_id"], r["task"]), []).append(r["ts"])
-    for lst in reward_ts_by_key.values():
+        rewards_by_key.setdefault((r["character_id"], r["task"]), []).append((pos(r["ts"], r["line_no"]), r))
+    for lst in rewards_by_key.values():
+        lst.sort(key=lambda x: x[0])
+
+    windows = {}  # (character_id, task) -> sorted assignment positions
+    for a in all_assignments:
+        windows.setdefault((a["character_id"], a["task"]), []).append(pos(a["assigned_at"], a["line_no"]))
+    for lst in windows.values():
         lst.sort()
 
-    def reward_at(character_id, task_name, ts):
-        lst = reward_ts_by_key.get((character_id, task_name))
-        if not lst:
-            return None
-        i = bisect.bisect_left(lst, ts)
-        return lst[i] if i < len(lst) else None
+    def window_end(r):
+        starts = windows.get((r["character_id"], r["task"]), [])
+        i = bisect.bisect_right(starts, pos(r["assigned_at"], r["line_no"]))
+        return starts[i] if i < len(starts) else None
 
     for r in all_assignments:
         r["zone"] = zone_at(r["character_id"], r["assigned_at"])
         r["npc"] = npc_at(r["character_id"], r["assigned_at"])
-        r["reward_at"] = reward_at(r["character_id"], r["task"], r["assigned_at"])
+        start, end = pos(r["assigned_at"], r["line_no"]), window_end(r)
+        reward = next((rw for p, rw in rewards_by_key.get((r["character_id"], r["task"]), [])
+                       if p > start and (end is None or p < end)), None)
+        r["reward_at"] = reward["ts"] if reward else None
+        r["reward_item"] = reward["item"] if reward else None
 
     rows = all_assignments
     if task:
@@ -613,30 +637,20 @@ def _compute_tasks(game, character="", task="", npc="", zone=""):
     if zone:
         needle = zone.lower()
         rows = [r for r in rows if needle in (r["zone"] or "").lower()]
-    rows.sort(key=lambda r: r["assigned_at"], reverse=True)
-
-    windows = {}  # (character_id, task) -> sorted list of assigned_at
-    for a in all_assignments:
-        windows.setdefault((a["character_id"], a["task"]), []).append(a["assigned_at"])
-    for lst in windows.values():
-        lst.sort()
+    rows.sort(key=lambda r: (r["assigned_at"], r["line_no"] or 0), reverse=True)
 
     updates = _correlate_task_updates(game, character)
     updates_by_key = {}
     for u in updates:
         updates_by_key.setdefault((u["character_id"], u["task"]), []).append(u)
-    for lst in updates_by_key.values():
-        lst.sort(key=lambda u: u["ts"])
 
     for r in rows:
-        key = (r["character_id"], r["task"])
-        same_task_starts = windows.get(key, [r["assigned_at"]])
-        later_starts = [ts for ts in same_task_starts if ts > r["assigned_at"]]
-        window_end = min(later_starts) if later_starts else None
-        r["updates"] = [
-            u for u in updates_by_key.get(key, [])
-            if r["assigned_at"] <= u["ts"] and (window_end is None or u["ts"] < window_end)
-        ]
+        start, end = pos(r["assigned_at"], r["line_no"]), window_end(r)
+        r["updates"] = sorted(
+            (u for u in updates_by_key.get((r["character_id"], r["task"]), [])
+             if start <= pos(u["ts"], u["line_no"]) and (end is None or pos(u["ts"], u["line_no"]) < end)),
+            key=lambda u: pos(u["ts"], u["line_no"]),
+        )
 
     return rows
 
@@ -907,6 +921,16 @@ def quests_report_eq(request: Request, character: str = "", npc: str = "", zone:
         "unresolved_zone_starts": _unresolved_zone_starts("eq"),
         "filters": {"character": character, "npc": npc, "zone": zone},
         "truncated": truncated, "limit": QUESTS_RECENT_LIMIT,
+    })
+
+
+@app.get("/tasks/eql", response_class=HTMLResponse)
+def tasks_report_eql(request: Request, character: str = "", task: str = "", npc: str = "", zone: str = ""):
+    rows = _compute_tasks("eql", character, task, npc, zone)
+    return templates.TemplateResponse(request, "tasks.html", {
+        "rows": rows, "game": "eql", "game_label": "EQ Legends",
+        "unresolved_zone_starts": _unresolved_zone_starts("eql"),
+        "filters": {"character": character, "task": task, "npc": npc, "zone": zone},
     })
 
 

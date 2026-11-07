@@ -10,9 +10,7 @@
   <li><a href="/zoneinfo/{{ game }}">Zone Info</a> -- one row per zone (all instance tiers combined): connections in/out, NPCs seen, loot, ground spawns, quest items, level range, rare mobs.</li>
   <li><a href="/npcs/{{ game }}">NPCs</a> -- searchable NPC roster: zones seen, level range, rare/vendor flags, sold items, dialogue transcript.</li>
   <li><a href="/quests/{{ game }}">Quests</a> -- NPC dialogue transcript (hails, says, bracketed keywords, rewards), zone filled in by correlation. No structured quest-completion event exists for classic EQ, so this is a raw transcript rather than a completions list.</li>
-  {% if game == 'eq' %}
-  <li><a href="/tasks/{{ game }}">Tasks</a> -- live EQ's structured Tasks system: assigned/rewarded per task, with NPC and zone filled in by correlation. Distinct from Quests above, which has no logged completion signal at all.</li>
-  {% endif %}
+  <li><a href="/tasks/{{ game }}">Tasks</a> -- the structured Tasks system: each time you picked up a task, when it was rewarded and with what, its updates, and the NPC and zone filled in by correlation. Distinct from Quests above, which has no logged completion signal at all.</li>
 </ul>
 
 <p><a href="/">&larr; Back to Home</a> for reports that aren't split by game (encounters, browse events, SQL query).</p>

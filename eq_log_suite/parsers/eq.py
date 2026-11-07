@@ -28,9 +28,10 @@ A second loot variant confirmed in that same sample: lootable objects/nodes
 space. _EQ_LOOT_OBJECT_RE below handles that form separately since
 _EQ_LOOT_RE's "'s corpse" is required text, not optional.
 
-Live EQ also has a structured "Tasks" system -- unlike EQL, which (per its
-own docstring) has no logged quest-completion signal at all, just branching
-NPC dialogue. Confirmed real task lines from that same sample:
+Live EQ also has a structured "Tasks" system (and so, since 2026-07, does
+EQL -- the assigned/updated lines are shared, in eq_legends.py; EQL's reward
+line differs, see h_task_given there). Confirmed real task lines from that
+same sample:
   "You have been assigned the task 'Jail Break!'."
   "Your task 'Jail Break!' has been updated."                (x many, no detail)
   "You've completed the tutorial on Hotbars!"                (tutorial-flavored completion)
@@ -91,27 +92,9 @@ _EQ_LOOT_OBJECT_RE = re.compile(
 )
 
 
-def h_task_assigned(m):
-    return ParsedEvent(
-        ts=None, raw_line=None, event_type="task_assigned",
-        source_name=None, source_type=None,
-        target_name=m.group("task"), target_type="task",
-        verb=None, amount=None, outcome=None,
-    )
-
-
 def h_task_reward(m):
     return ParsedEvent(
         ts=None, raw_line=None, event_type="task_reward",
-        source_name=None, source_type=None,
-        target_name=m.group("task"), target_type="task",
-        verb=None, amount=None, outcome=None,
-    )
-
-
-def h_task_updated(m):
-    return ParsedEvent(
-        ts=None, raw_line=None, event_type="task_updated",
         source_name=None, source_type=None,
         target_name=m.group("task"), target_type="task",
         verb=None, amount=None, outcome=None,
@@ -124,7 +107,6 @@ class EQParser(EQLegendsParser):
     PATTERNS = [
         (_EQ_LOOT_RE, h_loot),
         (_EQ_LOOT_OBJECT_RE, h_loot),
-        (re.compile(r"^You have been assigned the task '(?P<task>.+)'\.$"), h_task_assigned),
+        # assigned/updated come from EQLegendsParser.PATTERNS (shared)
         (re.compile(r"^You have successfully been granted your reward for: (?P<task>.+)$"), h_task_reward),
-        (re.compile(r"^Your task '(?P<task>.+)' has been updated\.$"), h_task_updated),
     ] + EQLegendsParser.PATTERNS

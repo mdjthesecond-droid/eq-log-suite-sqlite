@@ -49,6 +49,8 @@ And per character, history -- what the Database view's history pages show:
                 and PoK books need, so your casts themselves aren't kept.
 * history lines the events table keeps only HISTORY_TYPES: zone changes,
                 group, kills and loot, and every dialogue/quest/task line.
+                An EQ Legends task reward ("You have been given: X") gets
+                its task name here: the task updated in the same second.
                 Combat lines (and raw lines) aren't stored at all: they live
                 in the log file, and the Live view re-reads them from there.
 * HP            only for rare mobs: one is only ever up at a time, so the
@@ -117,6 +119,7 @@ class FactExtractor:
         self.visits: list = []      # visits with unwritten changes
         self.abilities: dict = {}   # pending, keyed (npc, base_zone, tier, solo, kind, name)
         self.last_cast = None       # your last spell cast's ts, and your last Gate/Origin's
+        self.last_task_update = None  # (ts, task) -- an EQL task reward doesn't name its task
         self.last_gate = None
         self.fight: dict = {}       # npc -> [damage taken so far, last hit ts], for rare HP
         self.engaged: dict = {}     # npc -> last time you and it traded hits
@@ -275,6 +278,14 @@ class FactExtractor:
             self.last_cast = ts
             if ev.verb in GATE_SPELLS:
                 self.last_gate = ts
+
+        if et == "task_updated":
+            self.last_task_update = (ts, ev.target_name)
+        elif et == "task_reward" and not ev.target_name:
+            # EQ Legends' "You have been given: X" -- it's the reward of the
+            # task updated in the same second, just before it (eq_legends.py).
+            if self.last_task_update and self.last_task_update[0] == ts:
+                ev.target_name = self.last_task_update[1]
 
         if et == "group":
             self.group = self._apply_group(self.group, ev.source_name, ev.source_type, ev.verb)

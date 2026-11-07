@@ -809,10 +809,52 @@ def h_faction(m):
     )
 
 
+def h_task_assigned(m):
+    # "You have been assigned the task 'Something is Wrrrong'."
+    return ParsedEvent(
+        ts=None, raw_line=None, event_type="task_assigned",
+        source_name=None, source_type=None,
+        target_name=m.group("task"), target_type="task",
+        verb=None, amount=None, outcome=None,
+    )
+
+
+def h_task_updated(m):
+    # "Your task 'Something is Wrrrong' has been updated." -- no detail of its own
+    return ParsedEvent(
+        ts=None, raw_line=None, event_type="task_updated",
+        source_name=None, source_type=None,
+        target_name=m.group("task"), target_type="task",
+        verb=None, amount=None, outcome=None,
+    )
+
+
+def h_task_given(m):
+    # "You have been given: Hamed's Ring of Tears" -- an EQ Legends task's
+    # reward. It doesn't name the task: checked on every real EQL log
+    # (2026-11-07, 56 of 56 rewards across 8 tasks -- Something is Wrrrong,
+    # This Means Warrr, the Potential of the Void weeklies) it always comes
+    # in the same second as, and right after, that task's last update, so
+    # the knowledge base fills the task in from that (facts.py) as it's
+    # recorded. ("You have successfully been granted your reward for: X"
+    # is achievements in EQL -- Level 50, Primary Class Unlock -- not tasks.)
+    return ParsedEvent(
+        ts=None, raw_line=None, event_type="task_reward",
+        source_name=None, source_type=None,
+        target_name=None, target_type="task",
+        verb=None, amount=None, outcome=None, extra={"item": m.group("item")},
+    )
+
+
 class EQLegendsParser(GameParser):
     game_code = "eql"
 
     PATTERNS = [
+        # Tasks -- EQ Legends has them too (seen from 2026-07): see h_task_given.
+        (re.compile(r"^You have been assigned the task '(?P<task>.+)'\.$"), h_task_assigned),
+        (re.compile(r"^Your task '(?P<task>.+)' has been updated\.$"), h_task_updated),
+        (re.compile(r"^You have been given: (?P<item>.+)$"), h_task_given),
+
         # "You pierce a grikbar kobold for 6 points of damage."
         # "You pierce a greater kobold for 112 points of damage. (Critical)"
         (re.compile(

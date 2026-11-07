@@ -221,9 +221,11 @@ def test_oddly_named_copy_with_confirmed_character_adds_nothing():
 
 
 def test_recorded_log_keeps_its_game_when_sniffing_would_flip():
-    # Real 2026-11-07: an EQ Legends log grew task lines (only the classic-EQ
-    # parser knows them), sniffing flipped to EverQuest, and reselecting it
-    # recorded lines under a second, EverQuest "Cheerful".
+    # Real 2026-11-07: an EQ Legends log grew task lines (then only the
+    # classic-EQ parser knew them), sniffing flipped to EverQuest, and
+    # reselecting it recorded lines under a second, EverQuest "Cheerful".
+    # EQL parses task lines now, so this uses another real EQL line only the
+    # classic-EQ parser reads: an achievement's "granted your reward for".
     from eq_log_suite.parsers.registry import detect_parser
     d = TMP / "elsewhere"           # not a configured log folder: only the record can tell
     d.mkdir()
@@ -233,7 +235,7 @@ def test_recorded_log_keeps_its_game_when_sniffing_would_flip():
     lw.select(str(log), "all")
     with open(log, "ab") as f:
         for i in range(3):
-            f.write(line(base + timedelta(seconds=10 + i), "You have been assigned the task 'Aid the Kerrans of Kerra Isle'."))
+            f.write(line(base + timedelta(seconds=10 + i), "You have successfully been granted your reward for: Level 50"))
     assert detect_parser(str(log)).game_code == "eq"     # sniffing alone gets it wrong now
     lw.select(str(log), "all")
     conn = lw.db.get_connection()
