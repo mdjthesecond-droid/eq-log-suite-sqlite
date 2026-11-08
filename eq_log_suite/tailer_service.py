@@ -84,7 +84,7 @@ class TailerService:
         if self.thread:
             return
         if not self._lock.acquire():
-            self.error = ("Another copy of the app is already recording -- stop it (bin/stop-all.sh) "
+            self.error = ("Another copy of the app is already recording -- close it (or bin/stop-all.sh) "
                           "so this one can. Two would record every line twice.")
             raise RuntimeError(self.error)
         ready = threading.Event()
@@ -102,6 +102,11 @@ class TailerService:
 
     async def _open_broadcaster(self):
         from eq_log_suite.tailer import OverlayBroadcaster
+        if os.name == "nt":
+            # The in-game overlay is Linux-only (and so are Unix sockets
+            # here) -- nothing to connect, and nothing worth warning about.
+            self.broadcaster = _NullBroadcaster()
+            return
         try:
             b = OverlayBroadcaster()
             await b.start(self.socket_path)

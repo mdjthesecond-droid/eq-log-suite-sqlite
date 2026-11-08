@@ -198,6 +198,56 @@ or deleted):
 .venv/bin/python -m eq_log_suite.facts
 ```
 
+## Windows
+
+The app runs on Windows as a normal program -- same pages, same recording,
+in its own window (Edge WebView2, built into Windows 10 and 11). What
+Windows doesn't get: the in-game overlay (the Vulkan layer is Linux-only)
+and desktop-notification alerts (sound alerts work, with `.wav` files).
+
+### Using it (no Python needed)
+
+1. Unzip `EQ-Log-Suite-windows-*.zip` anywhere (e.g. your Documents) and
+   run `EQ Log Suite.exe` inside the `EQ Log Suite` folder. It isn't signed,
+   so the first time Windows SmartScreen says "Windows protected your PC":
+   click **More info**, then **Run anyway**.
+2. In game, turn logging on: `/log on`.
+3. The app opens on Live. The first time, it suggests your EQ `Logs`
+   folder (it looks under `C:\Users\Public\Daybreak Game Company\Installed Games`
+   and Program Files) -- open it, choose **Use this folder as my log folder**,
+   then pick your character's log in the picker. Start the app before or
+   after the game, either works; closing its window stops recording.
+
+Your database and settings live in `%LOCALAPPDATA%\EQ Log Suite` (paste
+that into Explorer's address bar), not in the app folder -- so to update,
+delete the old app folder and unzip the new one; nothing is lost. To back
+up, close the app and copy `data\eqlogs.sqlite3` from there. If something
+goes wrong, `logs\app.log` in the same place has the details.
+
+Log rotation (on the Database page) renames the game's log file, which
+Windows won't allow while the game has it open -- the app just keeps
+following the file and tries again every 10 minutes.
+
+### Building the Windows app
+
+On Windows, with [Python](https://www.python.org/downloads/windows/) 3.11
+or newer (the installer's defaults are fine) and the project cloned or
+unzipped:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\build-windows.ps1
+```
+
+It makes `.venv`, installs the requirements and PyInstaller, builds
+`dist\EQ Log Suite\`, opens the app once to check it works (a window
+flashes up and closes -- the smoke test below), and zips the folder as
+`dist\EQ-Log-Suite-windows-<version>.zip` to share. `-SkipSmokeTest`
+skips the check; `-Python 3.13` picks a Python version.
+
+To run from source instead (no build), after the script has made `.venv`:
+`.venv\Scripts\python -m eq_log_suite.desktop`. The `bin\*.sh` scripts
+are Linux-only.
+
 ## Packaging the app (no Python needed to run it)
 
 ```bash
@@ -210,14 +260,16 @@ That makes `dist/EQ Log Suite/` -- one folder to zip up and share; run
 window (`start-app.sh`) with Python and everything else bundled: ~590 MB on
 Linux, mostly Qt WebEngine (Windows uses the built-in Edge WebView2
 instead, so it's much smaller). Build on the system you're building for --
-a Windows build has to be made on Windows.
+a Windows build has to be made on Windows (`packaging\build-windows.ps1`,
+above).
 
 A packaged app keeps its config and database in a per-user folder, not
 next to itself (so updating is just replacing the folder):
 `%LOCALAPPDATA%\EQ Log Suite` on Windows, `~/.local/share/eq-log-suite` on
 Linux. To check a build actually works -- the page renders in the window
 and talks to the app -- run it with `EQLS_SMOKE_TEST=1`; it prints
-`SMOKE TEST: loaded=True ...` and exits.
+`SMOKE TEST: loaded=True ...` and exits (on Windows the exe has no console,
+so that line goes to `logs\app.log` in the per-user folder).
 
 The in-game overlay (the Vulkan layer and its companion) isn't part of the
 packaged app; it's Linux-only and runs from source.

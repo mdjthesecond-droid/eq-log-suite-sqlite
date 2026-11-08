@@ -132,7 +132,8 @@ def main(argv=None):
         thread.join(timeout=5)
     # Qt WebEngine can hang tearing itself down at interpreter exit; every
     # recorded line is already committed, so end the process here.
-    sys.stdout.flush()
+    if sys.stdout:   # None in a windowed Windows build with no log file
+        sys.stdout.flush()
     os._exit(0)
 
 

@@ -6,6 +6,7 @@ not code -- add/edit/disable them from the web UI's /alerts page.
 import json
 import re
 import subprocess
+import sys
 import time
 
 FIELDS = {"event_type", "source_name", "source_type", "target_name", "target_type", "verb", "amount", "outcome"}
@@ -118,9 +119,9 @@ class AlertEngine:
         config = json.loads(rule["reaction_config"]) if rule["reaction_config"] else {}
 
         if "notify" in reactions:
-            subprocess.Popen(["notify-send", rule["name"], matched_text])
+            _notify(rule["name"], matched_text)
         if "sound" in reactions and config.get("sound_file"):
-            subprocess.Popen(["paplay", config["sound_file"]])
+            _play_sound(config["sound_file"])
         if "overlay" in reactions:
             text = config.get("overlay_text", matched_text)
             fields = _SafeDict(
@@ -150,3 +151,28 @@ class AlertEngine:
                 "countdown": bool(config.get("countdown")),
             })
         # 'log' is implicit -- the alert_log row above always happens.
+
+
+def _notify(title: str, text: str):
+    """A desktop notification (notify-send on Linux). Windows has no
+    command-line equivalent, so there it's skipped -- use the overlay or a
+    sound instead. Never raises: a missing tool mustn't stop recording."""
+    if sys.platform == "win32":
+        return
+    try:
+        subprocess.Popen(["notify-send", title, text])
+    except OSError as e:
+        print(f"[alerts] notify failed: {e}")
+
+
+def _play_sound(path: str):
+    """Plays a sound file without waiting for it: paplay on Linux, the
+    built-in winsound on Windows (.wav only). Never raises."""
+    try:
+        if sys.platform == "win32":
+            import winsound
+            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+        else:
+            subprocess.Popen(["paplay", path])
+    except (OSError, RuntimeError) as e:
+        print(f"[alerts] sound failed: {e}")

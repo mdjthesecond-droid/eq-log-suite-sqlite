@@ -385,6 +385,7 @@ async def tail_log_source(conn, log_source, broadcaster: OverlayBroadcaster):
 
     rotation_settings = db.get_rotation_settings(conn, game_id)
     rotation_settings_refreshed_at = time.monotonic()
+    rotation_retry_at = 0.0   # after a failed rotation, don't retry every tick
 
     f = open(path, "rb")
     size_now = os.fstat(f.fileno()).st_size
@@ -429,9 +430,20 @@ async def tail_log_source(conn, log_source, broadcaster: OverlayBroadcaster):
 
             wall_now = datetime.now(ROTATION_TZ)
             current_size = os.fstat(f.fileno()).st_size if rotation_settings.get("mode") == "size" else 0
-            if _rotation_due(rotation_settings, wall_now, last_rotated_at, current_size):
+            if now >= rotation_retry_at and _rotation_due(rotation_settings, wall_now, last_rotated_at, current_size):
+                pos = f.tell()
                 f.close()
-                offset = _rotate_log_file(path)
+                try:
+                    offset = _rotate_log_file(path)
+                except OSError as e:
+                    # e.g. Windows refuses to rename a file another program
+                    # (the game) has open. Carry on following it; try again
+                    # in ten minutes.
+                    print(f"[tailer] couldn't rotate {path} ({e}) -- will retry in 10 minutes")
+                    f = open(path, "rb")
+                    f.seek(pos)
+                    rotation_retry_at = now + 600
+                    continue
                 f = open(path, "rb")
                 last_rotated_at = wall_now
                 db.mark_log_source_rotated(conn, log_source_id, offset)
