@@ -63,8 +63,8 @@ OverlayState& GetOverlayState();
 // configured it via the companion app.
 std::pair<float, float> ResolveBoxPosition(OverlayState& state, const std::string& key);
 
-// Background thread: connects (reconnect-on-failure, mirroring
-// eq_log_suite/overlay/mangohud_writer.py's socket_reader_thread) to the
+// Background thread: connects (reconnecting whenever it drops, e.g. the app
+// restarting) to the
 // real alert-broadcast socket and updates GetOverlayState().boxes from
 // "kind":"alert" messages. Socket path defaults to tailer.py's
 // OverlayBroadcaster path but is overridable via the

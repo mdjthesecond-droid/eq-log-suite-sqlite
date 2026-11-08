@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Launches the app (if not already running) plus the native Vulkan
-# overlay's companion app -- the movable/countdown-bar alternative to
-# start-mangohud-alerts.sh's text-only rows (see overlay-native/README or
-# project memory for the full design).
+# overlay's companion app, for positioning its in-game boxes (see README:
+# "The in-game overlay").
 #
 # Requires the layer to be installed first (overlay-native/install.sh) and
 # EQLOG_OVERLAY_ENABLE=1 added to the game's Steam launch options for the

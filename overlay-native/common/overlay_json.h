@@ -96,8 +96,7 @@ inline bool ParseNumberArray(const std::string& s, size_t& i, std::vector<double
 
 // Parses ONE flat JSON object from `line` into `out`. Returns false (and
 // leaves `out` in an unspecified state) on any malformed input - callers
-// should just drop the line, matching mangohud_writer.py's
-// `except json.JSONDecodeError: pass` behavior for the same wire format.
+// should just drop the line.
 inline bool ParseFlatJsonObject(const std::string& line, JsonObject& out) {
     using namespace overlay_json_detail;
     out.clear();

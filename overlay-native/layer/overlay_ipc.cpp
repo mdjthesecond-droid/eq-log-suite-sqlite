@@ -254,8 +254,8 @@ void HandleAlertMessage(const JsonObject& msg) {
 // auto-expires from DrawOverlayFrame's pruning loop) rather than a separate
 // box type -- multi-line text via embedded '\n' is all ImGui::TextUnformatted
 // needs, so the existing draw path already handles this with no changes.
-// Frozen-not-cleared when combat pauses, same convention
-// mangohud_writer.py's DPS row already established.
+// Frozen-not-cleared when combat pauses, so the last fight's numbers stay
+// readable.
 void HandleDpsMessage(const JsonObject& msg) {
     std::string key = GetStr(msg, "key", "dps_meter");
 
@@ -317,7 +317,7 @@ void BroadcastClientLoop() {
 
         if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
             close(fd);
-            sleep(2); // tailer.py not up yet / restarting - matches mangohud_writer.py's reconnect loop
+            sleep(2); // the app not up yet / restarting - keep retrying
             continue;
         }
 
@@ -337,7 +337,7 @@ void BroadcastClientLoop() {
                 if (line.empty()) continue;
 
                 JsonObject msg;
-                if (!ParseFlatJsonObject(line, msg)) continue; // drop malformed lines, same as mangohud_writer.py
+                if (!ParseFlatJsonObject(line, msg)) continue; // drop malformed lines
 
                 std::string kind = GetStr(msg, "kind");
                 if (kind == "alert") HandleAlertMessage(msg);

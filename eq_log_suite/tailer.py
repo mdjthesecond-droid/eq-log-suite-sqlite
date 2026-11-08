@@ -135,7 +135,7 @@ def _rotate_log_file(path: str) -> int:
 COMBAT_TIMEOUT_SECONDS = 6.0
 DPS_TICK_INTERVAL = 0.5
 # How long an in-combat/out-of-combat alert stays on screen before the
-# overlay/MangoHud clear it -- separate from COMBAT_TIMEOUT_SECONDS, which
+# overlay clear it -- separate from COMBAT_TIMEOUT_SECONDS, which
 # only decides when combat itself is considered over.
 COMBAT_ALERT_DURATION_SECONDS = 10.0
 # Off by default -- was useful to confirm CombatTracker/DPSTracker work

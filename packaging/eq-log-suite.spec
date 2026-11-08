@@ -19,9 +19,9 @@ datas = [
     (str(ROOT / "config" / "local.example.yaml"), "config"),
 ]
 
-# The in-game overlays (GTK window, MangoHud writer, Vulkan layer) are their
+# The in-game overlays (GTK window, Vulkan layer) are their
 # own Linux-only programs, run from source -- not part of the app.
-excludes = ["tkinter", "eq_log_suite.overlay.window", "eq_log_suite.overlay.mangohud_writer", "gi"]
+excludes = ["tkinter", "eq_log_suite.overlay.window", "gi"]
 if sys.platform == "win32":
     excludes += ["PyQt6", "qtpy"]          # Windows draws the window with Edge WebView2
 
