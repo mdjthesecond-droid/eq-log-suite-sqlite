@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Launches everything for a normal play session: the tailer, the native
-# Vulkan overlay's companion window, and the web UI. Delegates to the
+# Launches everything for a normal play session: the app (window), and the
+# native Vulkan overlay's companion window. Delegates to the
 # existing per-piece scripts so each one's pgrep guard and log path stay
 # defined in exactly one place.
 #
@@ -11,5 +11,5 @@
 set -e
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# start-overlay-native.sh starts the web app (which does the tailing) too.
+# start-overlay-native.sh starts the app (which records and feeds the overlay) too.
 "$PROJECT_DIR/bin/start-overlay-native.sh"
