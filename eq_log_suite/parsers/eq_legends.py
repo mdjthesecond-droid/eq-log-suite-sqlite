@@ -255,6 +255,10 @@ def h_rune_buff_end(m):
 # one-line change.
 _PROC_TRIGGER_PHRASES = {
     "You feel the urge to rampage.": "Rampage",
+    # Confirmed real 2026-11-09: fires mid-melee with no cast, each time in
+    # the same second as a 32-point "You gain a rune" (same shape as
+    # Rampage). The log never names the proc; this label is the buff text.
+    "Your muscles bulge with berserker strength.": "Berserker Strength",
 }
 
 
